@@ -1,0 +1,8 @@
+flowchart LR
+    User["Local reviewer"] --> Browser["Browser pilot"]
+    Files["Bounded case files"] --> Browser
+    Browser --> OCR["Browser OCR"]
+    Browser --> IDB["IndexedDB with local guards"]
+    IDB --> Review["Manual review"]
+    Review --> Query["Deterministic query"]
+    Query --> Export["Formula-safe exports"]

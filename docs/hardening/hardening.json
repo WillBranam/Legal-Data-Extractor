@@ -1,0 +1,260 @@
+{
+  "documentType": "codex-security.hardening-analysis",
+  "schemaVersion": "1.0",
+  "analysisId": "hardening_offline_local_appliance",
+  "sourceScan": {
+    "scanId": "6d76cc34-7222-4013-b714-d9902aaa1ea6",
+    "manifestSha256": "42dea1e134e4899c9a7c4f8d18cbc71a813096f69cdbccf4f71ff12f460cdc04",
+    "targetRevision": "8fcfede8f848712bc3b6b6d7cacc9590294aa9c3",
+    "sourceDrift": "present"
+  },
+  "assessment": {
+    "outcome": "opportunities_identified",
+    "summary": "Move protected offline work behind one loopback service that owns identity, encryption, audit, model routing, backup, and legal-hold enforcement."
+  },
+  "constraints": {
+    "profile": "offline_protected",
+    "changeHorizons": ["incremental", "foundational"],
+    "nonNegotiables": [
+      "No evidence or prompt egress to a non-loopback endpoint.",
+      "Only approved facts with exact verified citations may be displayed."
+    ],
+    "assumptions": [
+      "The firm supplies a managed workstation and physical safeguards.",
+      "No measured local-model latency or memory budget was supplied."
+    ]
+  },
+  "opportunities": [
+    {
+      "opportunityId": "offline-phi-boundary",
+      "title": "Own the offline PHI boundary",
+      "summary": "Place protected lifecycle controls behind an authenticated same-origin loopback service.",
+      "diagnosis": "The browser pilot minimized cloud egress but no component owned identity, encrypted originals, durable audit, recovery, or retention enforcement.",
+      "evidence": [
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_f4c564185d0d39f768537082",
+          "path": "src/lib/exports.ts",
+          "claim": "Untrusted document text reached CSV output without formula neutralization."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_45e17a6684ab79d6be4e49be",
+          "path": "src/lib/parsers.ts",
+          "claim": "Untrusted files reached browser parsers without explicit resource budgets."
+        },
+        {
+          "claimType": "inferred",
+          "sourceKind": "source",
+          "path": "src/lib/storage.ts",
+          "claim": "Protected lifecycle policy was delegated to one unauthenticated IndexedDB record."
+        }
+      ],
+      "desiredInvariants": [
+        "Protected evidence, prompts, and model responses never leave loopback.",
+        "Original and canonical evidence is stored using authenticated encryption.",
+        "Every approval and export is attributable to an authenticated identity.",
+        "Legal hold is enforced at the storage deletion boundary.",
+        "Every visible factual claim maps to an approved fact and verified citation."
+      ],
+      "proposalPath": "proposals/offline-phi-boundary.md",
+      "options": [
+        {
+          "optionId": "browser-guards",
+          "title": "Strengthened browser pilot",
+          "kind": "baseline",
+          "summary": "Keep browser persistence and add focused parser and export controls.",
+          "diagramPaths": {
+            "before": "diagrams/offline-phi-boundary-before.mmd",
+            "after": "diagrams/offline-phi-boundary-browser-guards-after.mmd"
+          },
+          "findingCoverage": [
+            {
+              "findingId": "csf_f4c564185d0d39f768537082",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "A safe CSV serializer directly removes the observed formula path."
+            },
+            {
+              "findingId": "csf_45e17a6684ab79d6be4e49be",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "Browser parser budgets directly constrain the observed resource path."
+            }
+          ],
+          "tradeoffs": [
+            {
+              "dimension": "security",
+              "direction": "improves",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "Parser and export paths improve, while identity, encryption, audit, and recovery remain ambient endpoint concerns.",
+              "validationPlan": "Run adversarial parser and spreadsheet export tests."
+            },
+            {
+              "dimension": "performance",
+              "direction": "neutral",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Simple limits and cell encoding add negligible critical-path work.",
+              "validationPlan": "Compare representative imports and exports."
+            },
+            {
+              "dimension": "memory",
+              "direction": "neutral",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Limits reduce worst-case allocation without adding a new process.",
+              "validationPlan": "Measure browser peak memory during bounded imports."
+            },
+            {
+              "dimension": "reliability",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Oversized inputs fail early, but IndexedDB remains the sole recovery point.",
+              "validationPlan": "Test rejected batches and browser-storage loss."
+            },
+            {
+              "dimension": "operability",
+              "direction": "neutral",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "No additional local service is introduced.",
+              "validationPlan": "Confirm existing deployment workflow remains unchanged."
+            },
+            {
+              "dimension": "migration",
+              "direction": "neutral",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "The browser data model remains compatible.",
+              "validationPlan": "Load existing synthetic workspace fixtures."
+            }
+          ],
+          "residualRisks": [
+            "No application-owned identity, encrypted originals, audit chain, backup, or legal hold."
+          ],
+          "implementationReadiness": {
+            "affectedComponents": ["src/lib/parsers.ts", "src/lib/exports.ts"],
+            "workPackages": ["Add resource budgets and spreadsheet-safe encoding."],
+            "acceptanceCriteria": ["Oversized inputs are rejected and formula text is inert."],
+            "migrationNotes": [],
+            "rollback": "Revert the focused parser and export changes."
+          }
+        },
+        {
+          "optionId": "local-appliance",
+          "title": "Loopback local appliance",
+          "kind": "isolation",
+          "summary": "Run the UI, encrypted vault, audit service, and Ollama gateway on loopback.",
+          "diagramPaths": {
+            "before": "diagrams/offline-phi-boundary-before.mmd",
+            "after": "diagrams/offline-phi-boundary-local-appliance-after.mmd"
+          },
+          "findingCoverage": [
+            {
+              "findingId": "csf_f4c564185d0d39f768537082",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The structural change does not replace the safe CSV serializer."
+            },
+            {
+              "findingId": "csf_45e17a6684ab79d6be4e49be",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The local boundary still requires format-specific resource limits."
+            }
+          ],
+          "tradeoffs": [
+            {
+              "dimension": "security",
+              "direction": "improves",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "Loopback enforcement centralizes encryption, identity, audit, model routing, backups, and holds.",
+              "validationPlan": "Test remote-host rejection, authentication, ciphertext tampering, audit tampering, and legal hold."
+            },
+            {
+              "dimension": "performance",
+              "direction": "regresses",
+              "confidence": "medium",
+              "basis": "analogous",
+              "assessment": "Encryption and local model inference add CPU time and same-origin serialization.",
+              "validationPlan": "Benchmark native and OCR PDFs with the approved hardware and model."
+            },
+            {
+              "dimension": "memory",
+              "direction": "regresses",
+              "confidence": "high",
+              "basis": "analogous",
+              "assessment": "Ollama retains model weights and inference state in addition to browser OCR buffers.",
+              "validationPlan": "Measure combined browser, Node, and Ollama peak memory."
+            },
+            {
+              "dimension": "reliability",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Authenticated encryption and portable encrypted backups improve recovery, but one workstation remains one failure domain.",
+              "validationPlan": "Complete backup restore and citation reproduction exercises."
+            },
+            {
+              "dimension": "operability",
+              "direction": "regresses",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "The firm must manage Ollama, vault passwords, endpoint policy, backups, and readiness checks.",
+              "validationPlan": "Run the local runbook with an independent operator."
+            },
+            {
+              "dimension": "migration",
+              "direction": "regresses",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "Authoritative sources must be re-imported into a new vault instead of trusting browser-state migration.",
+              "validationPlan": "Pilot a synthetic matter from import through restored backup."
+            }
+          ],
+          "residualRisks": [
+            "Managed endpoint, MFA, physical security, incident response, and retention schedules remain firm responsibilities.",
+            "Human review remains necessary to establish logical support beyond byte matching."
+          ],
+          "implementationReadiness": {
+            "affectedComponents": [
+              "src/app/api/local",
+              "src/lib/local-vault.ts",
+              "src/lib/local-llm.ts",
+              "src/components/legal-workspace.tsx"
+            ],
+            "workPackages": [
+              "Implement loopback and model boundaries.",
+              "Implement encrypted vault, identity, sessions, audit, originals, backup, and legal hold.",
+              "Integrate structured local extraction and approved-fact query selection.",
+              "Validate offline operation and operational controls."
+            ],
+            "acceptanceCriteria": [
+              "No evidence request reaches a non-loopback address.",
+              "Unauthenticated local APIs fail.",
+              "Only approved facts with verified citations are displayed.",
+              "Backup restoration and audit verification pass."
+            ],
+            "migrationNotes": [
+              "Do not automatically migrate protected browser IndexedDB data."
+            ],
+            "rollback": "Stop the local service and preserve the encrypted vault; never move protected data into the public browser profile."
+          }
+        }
+      ],
+      "recommendedOptionId": "local-appliance",
+      "recommendation": "Use the local appliance for protected offline work and retain the strengthened browser profile only for synthetic demonstrations."
+    }
+  ],
+  "openQuestions": [
+    "Which model and hardware profile will the firm approve?",
+    "Which operating-system MFA and browser-management baseline applies?",
+    "What retention schedules and encrypted backup destinations are approved?"
+  ]
+}

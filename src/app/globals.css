@@ -42,6 +42,113 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+.local-access-page {
+  display: grid;
+  min-height: 100vh;
+  padding: 32px;
+  place-items: center;
+  background:
+    linear-gradient(rgb(19 34 53 / 94%), rgb(19 34 53 / 94%)),
+    var(--navy);
+}
+
+.local-access-card {
+  width: min(470px, 100%);
+  padding: 38px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-top: 4px solid var(--accent);
+  border-radius: 5px;
+  box-shadow: var(--shadow);
+}
+
+.local-access-card > .brand-mark {
+  margin-bottom: 24px;
+  color: white;
+  background: var(--navy);
+}
+
+.local-access-card h1 {
+  margin: 8px 0 0;
+  font-family: var(--serif);
+  font-size: 30px;
+  font-weight: 600;
+}
+
+.local-access-card > p {
+  margin: 12px 0 24px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.local-access-card form {
+  display: grid;
+  gap: 16px;
+}
+
+.local-access-card label {
+  display: grid;
+  gap: 7px;
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.local-access-card input {
+  min-height: 43px;
+  padding: 0 12px;
+  color: var(--ink);
+  background: white;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+}
+
+.local-access-card small {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.access-error {
+  padding: 10px 12px;
+  color: var(--red);
+  background: var(--red-soft);
+  border: 1px solid #e4bcbc;
+  border-radius: 3px;
+  font-size: 11px;
+  text-transform: lowercase;
+}
+
+.local-access-boundary {
+  display: flex;
+  gap: 10px;
+  margin-top: 24px;
+  padding-top: 18px;
+  color: var(--green);
+  border-top: 1px solid var(--line);
+}
+
+.local-access-boundary span {
+  display: grid;
+  gap: 3px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.local-access-boundary strong {
+  color: var(--green);
+}
+
+.settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.inspector-source-button {
+  width: 100%;
+  margin-bottom: 16px;
+}
+
 button,
 input {
   font: inherit;

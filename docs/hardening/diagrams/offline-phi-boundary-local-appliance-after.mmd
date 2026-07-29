@@ -1,0 +1,11 @@
+flowchart LR
+    User["Authenticated reviewer"] --> Browser["Loopback browser UI"]
+    Files["Bounded case files"] --> Browser
+    Browser --> OCR["Bundled local OCR"]
+    Browser --> API["Same-origin local API"]
+    API --> Vault["Encrypted local vault"]
+    API --> Audit["Hash-chained audit"]
+    API --> Model["Loopback Ollama"]
+    Model --> Review["Pending facts"]
+    Review --> Verify["Deterministic verification"]
+    Verify --> Query["Approved-record query"]

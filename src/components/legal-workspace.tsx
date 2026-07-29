@@ -46,10 +46,32 @@ import {
   exportXlsx
 } from "@/lib/exports";
 import { createLocalOcrSession } from "@/lib/ocr";
-import { parseLocalFile, type ParseProgress } from "@/lib/parsers";
+import {
+  MAX_SOURCE_FILE_BYTES,
+  parseLocalFile,
+  type ParseProgress
+} from "@/lib/parsers";
 import { queryApprovedFacts } from "@/lib/query";
-import { clearWorkspace, loadWorkspace, saveWorkspace } from "@/lib/storage";
+import {
+  clearWorkspace,
+  loadWorkspace,
+  saveWorkspace,
+  type StorageMode
+} from "@/lib/storage";
 import { createEmptyWorkspace } from "@/lib/workspace";
+import {
+  extractDocumentWithLocalModel,
+  downloadEncryptedBackup,
+  downloadOriginalFile,
+  getLocalRuntimeStatus,
+  loginLocalRuntime,
+  logoutLocalRuntime,
+  recordLocalAuditEvent,
+  selectFactsWithLocalModel,
+  setupLocalRuntime,
+  storeOriginalFile,
+  type LocalRuntimeStatus
+} from "@/lib/local-client";
 import type {
   Citation,
   FactRecord,
@@ -113,8 +135,10 @@ interface ImportPerformance {
   durationMs: number;
 }
 
-export function LegalWorkspace() {
+export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
   const [workspace, setWorkspace] = useState<WorkspaceState | null>(null);
+  const [localStatus, setLocalStatus] = useState<LocalRuntimeStatus | null>(null);
+  const [accessError, setAccessError] = useState<string | null>(null);
   const [view, setView] = useState<View>("overview");
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState<QueryAnswer | null>(null);
@@ -128,26 +152,73 @@ export function LegalWorkspace() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
 
+  const storageMode: StorageMode = localMode
+    ? "encrypted-local-vault"
+    : "browser-local";
+
+  const initializeWorkspace = useCallback(async () => {
+    const saved = await loadWorkspace(storageMode);
+    const state = saved ?? createEmptyWorkspace();
+    if (!saved) await saveWorkspace(state, storageMode);
+    setWorkspace(state);
+    setSelectedCitationId(null);
+  }, [storageMode]);
+
   useEffect(() => {
     let active = true;
     async function initialize() {
-      const saved = await loadWorkspace();
-      const state = saved ?? createEmptyWorkspace();
-      if (!saved) await saveWorkspace(state);
-      if (!active) return;
-      setWorkspace(state);
-      setSelectedCitationId(null);
+      try {
+        if (localMode) {
+          const status = await getLocalRuntimeStatus();
+          if (!active) return;
+          setLocalStatus(status);
+          if (!status.authenticated) return;
+        }
+        await initializeWorkspace();
+      } catch (error) {
+        if (active) {
+          setAccessError(
+            error instanceof Error ? error.message : "Could not open the local workspace."
+          );
+        }
+      }
     }
     void initialize();
     return () => {
       active = false;
     };
-  }, []);
+  }, [initializeWorkspace, localMode]);
 
   const updateWorkspace = useCallback(async (state: WorkspaceState) => {
+    await saveWorkspace(state, storageMode);
     setWorkspace(state);
-    await saveWorkspace(state);
-  }, []);
+  }, [storageMode]);
+
+  async function completeLocalAccess(input: {
+    username: string;
+    password: string;
+    setup: boolean;
+  }) {
+    setAccessError(null);
+    try {
+      if (input.setup) {
+        await setupLocalRuntime(input);
+      } else {
+        await loginLocalRuntime(input);
+      }
+      const status = await getLocalRuntimeStatus();
+      setLocalStatus(status);
+      await initializeWorkspace();
+    } catch (error) {
+      setAccessError(error instanceof Error ? error.message : "Local access failed.");
+    }
+  }
+
+  async function signOutLocal() {
+    await logoutLocalRuntime();
+    setWorkspace(null);
+    setLocalStatus(await getLocalRuntimeStatus());
+  }
 
   const selectedCitation = useMemo(
     () => workspace?.citations.find((item) => item.id === selectedCitationId) ?? null,
@@ -174,21 +245,55 @@ export function LegalWorkspace() {
 
   async function runQuery() {
     if (!workspace || question.trim().length === 0) return;
-    const result = await queryApprovedFacts({
-      question,
-      facts: workspace.facts,
-      citations: workspace.citations,
-      documents: workspace.documents
-    });
-    setAnswer(result);
-    setView("query");
-    if (result.claims[0]?.citationIds[0]) {
-      setSelectedCitationId(result.claims[0].citationIds[0]);
+    try {
+      let queryFacts = workspace.facts;
+      if (localMode) {
+        if (!localStatus?.model.reachable || !localStatus.model.installed) {
+          const unavailable: QueryAnswer = {
+            status: "insufficient_evidence",
+            question,
+            claims: []
+          };
+          setAnswer(unavailable);
+          setNotice("The approved record was not queried because the local model is unavailable.");
+          setView("query");
+          return;
+        }
+        const selectedIds = new Set(
+          await selectFactsWithLocalModel({
+            matterId: workspace.matter.id,
+            question,
+            facts: workspace.facts
+          })
+        );
+        queryFacts = workspace.facts.filter((fact) => selectedIds.has(fact.id));
+      }
+      const result = await queryApprovedFacts({
+        question,
+        facts: queryFacts,
+        citations: workspace.citations,
+        documents: workspace.documents,
+        selectAllApproved: localMode,
+        ...(localMode ? { limit: queryFacts.length } : {})
+      });
+      setAnswer(result);
+      setView("query");
+      if (result.claims[0]?.citationIds[0]) {
+        setSelectedCitationId(result.claims[0].citationIds[0]);
+      }
+    } catch (error) {
+      setNotice(
+        error instanceof Error ? error.message : "The approved record could not be queried."
+      );
     }
   }
 
   async function reviewFact(factId: string, status: "approved" | "rejected") {
     if (!workspace) return;
+    const currentFact = workspace.facts.find((fact) => fact.id === factId);
+    if (!currentFact) return;
+    const reviewer = localStatus?.username ?? "Local reviewer";
+    const reviewedAt = new Date().toISOString();
     const next: WorkspaceState = {
       ...workspace,
       facts: workspace.facts.map((fact) =>
@@ -196,19 +301,53 @@ export function LegalWorkspace() {
           ? {
               ...fact,
               status,
-              reviewer: "Local reviewer",
-              reviewedAt: new Date().toISOString()
+              reviewer,
+              reviewedAt
             }
           : fact
       ),
+      reviewDecisions: [
+        ...workspace.reviewDecisions,
+        {
+          id: crypto.randomUUID(),
+          factId,
+          reviewer,
+          decision: status,
+          priorStatus: currentFact.status,
+          occurredAt: reviewedAt
+        }
+      ],
       matter: { ...workspace.matter, updatedAt: new Date().toISOString() }
     };
-    await updateWorkspace(next);
-    setNotice(status === "approved" ? "Fact approved and queryable." : "Fact rejected.");
+    try {
+      if (localMode) {
+        await recordLocalAuditEvent({
+          action: status === "approved" ? "review.approve" : "review.reject",
+          resourceType: "fact",
+          resourceId: factId
+        });
+      }
+      await updateWorkspace(next);
+      setNotice(status === "approved" ? "Fact approved and queryable." : "Fact rejected.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "The review could not be saved.");
+    }
   }
 
   async function importFiles(files: FileList | null) {
     if (!workspace || !files || files.length === 0) return;
+    const selectedFiles = Array.from(files);
+    const totalBytes = selectedFiles.reduce((total, file) => total + file.size, 0);
+    if (
+      selectedFiles.length > 200 ||
+      totalBytes > 500 * 1024 * 1024 ||
+      selectedFiles.some((file) => file.size > MAX_SOURCE_FILE_BYTES)
+    ) {
+      setNotice(
+        "Import rejected: use at most 200 files, 500 MB per batch, and 100 MB per file."
+      );
+      return;
+    }
     setImporting(true);
     setNotice(null);
     setImportPerformance(null);
@@ -219,19 +358,59 @@ export function LegalWorkspace() {
     const facts = [...workspace.facts];
     const importedDocuments: WorkspaceState["documents"] = [];
     const errors: string[] = [];
+    const extractionErrors: string[] = [];
     try {
-      for (const file of Array.from(files)) {
+      for (const file of selectedFiles) {
         try {
           const document = await parseLocalFile(file, {
             ocrSession,
             onProgress: setImportProgress
           });
+          if (localMode) {
+            await storeOriginalFile(document.id, file);
+          }
           importedDocuments.push(document);
           documents.push(document);
           if (
             document.processingState === "ready" &&
             document.canonicalText.length > 0
           ) {
+            if (localMode) {
+              try {
+                const proposals = await extractDocumentWithLocalModel(document);
+                for (const proposal of proposals) {
+                  const citation: Citation = {
+                    id: crypto.randomUUID(),
+                    documentId: document.id,
+                    originalFileSha256: document.originalSha256,
+                    canonicalArtifactSha256: document.canonicalSha256,
+                    canonicalByteStart: proposal.canonicalByteStart,
+                    canonicalByteEnd: proposal.canonicalByteEnd,
+                    exactQuote: proposal.exactQuote,
+                    pageNumber: proposal.pageNumber,
+                    structuralPath: `local-llm/page-${proposal.pageNumber}`,
+                    parserVersion: document.parserVersion
+                  };
+                  if (!(await verifyCitation(citation, document)).verified) continue;
+                  citations.push(citation);
+                  facts.push({
+                    id: crypto.randomUUID(),
+                    matterId: workspace.matter.id,
+                    type: proposal.type,
+                    statement: proposal.statement,
+                    eventDate: proposal.eventDate,
+                    confidence: proposal.confidence,
+                    status: "pending",
+                    citationIds: [citation.id],
+                    reviewer: null,
+                    reviewedAt: null
+                  });
+                }
+              } catch {
+                extractionErrors.push(file.name);
+              }
+              continue;
+            }
             const sourcePage = document.pages.find(
               (page) => page.canonicalByteEnd > page.canonicalByteStart
             );
@@ -308,18 +487,27 @@ export function LegalWorkspace() {
       durationMs: performance.now() - startedAt
     });
     setNotice(
-      errors.length === 0
-        ? `${importedDocuments.length} file${importedDocuments.length === 1 ? "" : "s"} processed locally.`
-        : `${importedDocuments.length} processed locally; ${errors.length} could not be read. No source file was transmitted.`
+      [
+        `${importedDocuments.length} file${importedDocuments.length === 1 ? "" : "s"} processed locally.`,
+        errors.length > 0 ? `${errors.length} could not be read.` : "",
+        extractionErrors.length > 0
+          ? `${extractionErrors.length} could not be extracted by the local model; the encrypted source remains available for retry.`
+          : "",
+        "No source file was transmitted outside this workstation."
+      ].filter(Boolean).join(" ")
     );
     if (fileInputRef.current) fileInputRef.current.value = "";
     if (folderInputRef.current) folderInputRef.current.value = "";
   }
 
   async function clearLocalMatter() {
-    await clearWorkspace();
+    if (workspace?.matter.legalHold) {
+      setNotice("Matter deletion is blocked while the legal hold is active.");
+      return;
+    }
+    await clearWorkspace(storageMode);
     const state = createEmptyWorkspace();
-    await saveWorkspace(state);
+    await saveWorkspace(state, storageMode);
     setWorkspace(state);
     setSelectedCitationId(null);
     setQuestion("");
@@ -328,11 +516,38 @@ export function LegalWorkspace() {
     setNotice("Local matter data cleared.");
   }
 
+  async function setLegalHold(enabled: boolean) {
+    if (!workspace) return;
+    try {
+      await updateWorkspace({
+        ...workspace,
+        matter: {
+          ...workspace.matter,
+          legalHold: enabled,
+          updatedAt: new Date().toISOString()
+        }
+      });
+      setNotice(enabled ? "Legal hold enabled." : "Legal hold released.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "The legal hold could not be changed.");
+    }
+  }
+
+  if (localMode && localStatus && !localStatus.authenticated) {
+    return (
+      <LocalAccessScreen
+        configured={localStatus.configured}
+        error={accessError}
+        onSubmit={completeLocalAccess}
+      />
+    );
+  }
+
   if (!workspace) {
     return (
       <main className="loading-screen">
         <div className="brand-mark">VC</div>
-        <p>Opening the private matter workspace…</p>
+        <p>{accessError ?? "Opening the private matter workspace…"}</p>
       </main>
     );
   }
@@ -507,11 +722,21 @@ export function LegalWorkspace() {
             ) : null}
 
             {view === "exports" ? (
-              <ExportsView workspace={workspace} />
+              <ExportsView
+                workspace={workspace}
+                auditExports={localMode}
+                onError={setNotice}
+              />
             ) : null}
 
             {view === "settings" ? (
-              <SettingsView onReset={clearLocalMatter} />
+              <SettingsView
+                onReset={clearLocalMatter}
+                localStatus={localStatus}
+                onSignOut={localMode ? signOutLocal : undefined}
+                legalHold={workspace.matter.legalHold}
+                onLegalHoldChange={setLegalHold}
+              />
             ) : null}
           </main>
 
@@ -521,11 +746,114 @@ export function LegalWorkspace() {
               document={selectedDocument}
               fact={selectedFact}
               onClose={() => setSelectedCitationId(null)}
+              onOpenOriginal={
+                localMode && selectedDocument
+                  ? async () => {
+                      try {
+                        await downloadOriginalFile(
+                          selectedDocument.id,
+                          selectedDocument.name
+                        );
+                      } catch (error) {
+                        setNotice(
+                          error instanceof Error
+                            ? error.message
+                            : "The original source could not be downloaded."
+                        );
+                      }
+                    }
+                  : undefined
+              }
             />
           ) : null}
         </div>
       </section>
     </div>
+  );
+}
+
+function LocalAccessScreen({
+  configured,
+  error,
+  onSubmit
+}: {
+  configured: boolean;
+  error: string | null;
+  onSubmit: (input: {
+    username: string;
+    password: string;
+    setup: boolean;
+  }) => Promise<void>;
+}) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [working, setWorking] = useState(false);
+
+  return (
+    <main className="local-access-page">
+      <section className="local-access-card">
+        <div className="brand-mark">VC</div>
+        <span className="small-label">Offline local appliance</span>
+        <h1>{configured ? "Unlock the evidence vault" : "Configure this workstation"}</h1>
+        <p>
+          Evidence is encrypted on this workstation. The local model and OCR are
+          reachable only over the loopback interface.
+        </p>
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            setWorking(true);
+            void onSubmit({ username, password, setup: !configured }).finally(() =>
+              setWorking(false)
+            );
+          }}
+        >
+          <label>
+            Reviewer name
+            <input
+              value={username}
+              onChange={(event) => setUsername(event.target.value)}
+              autoComplete="username"
+              required
+              minLength={3}
+            />
+          </label>
+          <label>
+            Vault password
+            <input
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              autoComplete={configured ? "current-password" : "new-password"}
+              required
+              minLength={configured ? 1 : 14}
+            />
+          </label>
+          {!configured ? (
+            <small>
+              Use at least 14 characters. Losing this password makes the encrypted
+              evidence unrecoverable.
+            </small>
+          ) : null}
+          {error ? (
+            <div className="access-error" role="alert">
+              {error.replaceAll("_", " ")}
+            </div>
+          ) : null}
+          <button className="primary-button" type="submit" disabled={working}>
+            <FolderLock size={17} />
+            {working ? "Opening vault…" : configured ? "Unlock vault" : "Create vault"}
+          </button>
+        </form>
+        <div className="local-access-boundary">
+          <ShieldCheck size={18} />
+          <span>
+            <strong>Loopback only</strong>
+            Do not expose this service to a LAN or public interface.
+          </span>
+        </div>
+      </section>
+    </main>
   );
 }
 
@@ -1203,28 +1531,53 @@ function DocumentsView({
   );
 }
 
-function ExportsView({ workspace }: { workspace: WorkspaceState }) {
+function ExportsView({
+  workspace,
+  auditExports,
+  onError
+}: {
+  workspace: WorkspaceState;
+  auditExports: boolean;
+  onError: (message: string) => void;
+}) {
   const args = [workspace.facts, workspace.citations, workspace.documents] as const;
+  const runExport = async (
+    format: "csv" | "xlsx" | "json" | "docx",
+    action: () => void | Promise<void>
+  ) => {
+    try {
+      await action();
+      if (auditExports) {
+        await recordLocalAuditEvent({
+          action: `export.${format}`,
+          resourceType: "export",
+          resourceId: workspace.matter.id
+        });
+      }
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "The export could not be created.");
+    }
+  };
   const formats = [
     {
       label: "CSV",
       description: "Flat, source-linked table for review and analysis.",
-      action: () => exportCsv(...args)
+      action: () => runExport("csv", () => exportCsv(...args))
     },
     {
       label: "XLSX",
       description: "Approved facts in an Excel-compatible workbook.",
-      action: () => void exportXlsx(...args)
+      action: () => runExport("xlsx", () => exportXlsx(...args))
     },
     {
       label: "JSON",
       description: "Structured records with exact citation metadata.",
-      action: () => exportJson(...args)
+      action: () => runExport("json", () => exportJson(...args))
     },
     {
       label: "DOCX",
       description: "Cited narrative list for legal work product.",
-      action: () => void exportDocx(...args)
+      action: () => runExport("docx", () => exportDocx(...args))
     }
   ];
   return (
@@ -1244,7 +1597,7 @@ function ExportsView({ workspace }: { workspace: WorkspaceState }) {
               <strong>{format.label} export</strong>
               <p>{format.description}</p>
             </div>
-            <button onClick={format.action}>
+            <button onClick={() => void format.action()}>
               <Download size={16} /> Download
             </button>
           </article>
@@ -1254,7 +1607,19 @@ function ExportsView({ workspace }: { workspace: WorkspaceState }) {
   );
 }
 
-function SettingsView({ onReset }: { onReset: () => Promise<void> }) {
+function SettingsView({
+  onReset,
+  localStatus,
+  onSignOut,
+  legalHold,
+  onLegalHoldChange
+}: {
+  onReset: () => Promise<void>;
+  localStatus: LocalRuntimeStatus | null;
+  onSignOut?: () => Promise<void>;
+  legalHold: boolean;
+  onLegalHoldChange: (enabled: boolean) => Promise<void>;
+}) {
   return (
     <section className="page-section">
       <div className="page-heading">
@@ -1268,8 +1633,22 @@ function SettingsView({ onReset }: { onReset: () => Promise<void> }) {
         <SettingRow
           icon={FolderLock}
           title="Evidence storage"
-          value="Browser-local IndexedDB"
-          detail="Source bytes and canonical artifacts never leave this device."
+          value={localStatus ? "AES-256-GCM local vault" : "Browser-local IndexedDB"}
+          detail={
+            localStatus
+              ? "Original files, canonical evidence, and review state are encrypted on this workstation."
+              : "Source bytes and canonical artifacts never leave this device."
+          }
+        />
+        <SettingRow
+          icon={Gavel}
+          title="Legal hold"
+          value={legalHold ? "Active" : "Not active"}
+          detail={
+            legalHold
+              ? "Matter deletion is blocked until an authorized reviewer releases the hold."
+              : "Enable a hold before preservation duties require deletion to be suspended."
+          }
         />
         <SettingRow
           icon={Cpu}
@@ -1280,19 +1659,66 @@ function SettingsView({ onReset }: { onReset: () => Promise<void> }) {
         <SettingRow
           icon={ShieldCheck}
           title="Natural-language query"
-          value="Deterministic local retrieval"
-          detail="Only approved facts with verified citations can be returned."
+          value={localStatus ? `Local ${localStatus.model.model}` : "Deterministic local retrieval"}
+          detail={
+            localStatus
+              ? "The loopback-only model selects approved fact IDs; deterministic code verifies citations before display."
+              : "Only approved facts with verified citations can be returned."
+          }
         />
+        {localStatus?.audit ? (
+          <SettingRow
+            icon={FileCheck2}
+            title="Audit chain"
+            value={localStatus.audit.valid ? "Verified" : "Verification failed"}
+            detail={`${localStatus.audit.records} tamper-evident local audit events recorded.`}
+          />
+        ) : null}
         <SettingRow
           icon={Gavel}
           title="Protected PHI mode"
-          value="Disabled"
-          detail="Requires executed BAAs and a separately reviewed production environment."
+          value={localStatus ? "Local technical profile" : "Disabled"}
+          detail={
+            localStatus
+              ? "Technical safeguards are enabled locally; organizational, physical, and legal controls remain the firm's responsibility."
+              : "Requires executed BAAs and a separately reviewed production environment."
+          }
         />
       </div>
-      <button className="secondary-button reset-button" onClick={() => void onReset()}>
-        <RotateCcw size={16} /> Clear local matter data
-      </button>
+      <div className="settings-actions">
+        <button
+          className="secondary-button"
+          onClick={() => {
+            if (
+              legalHold &&
+              !window.confirm(
+                "Release this legal hold? Matter deletion will become available."
+              )
+            ) {
+              return;
+            }
+            void onLegalHoldChange(!legalHold);
+          }}
+        >
+          {legalHold ? "Release legal hold" : "Enable legal hold"}
+        </button>
+        <button className="secondary-button reset-button" onClick={() => void onReset()}>
+          <RotateCcw size={16} /> Clear local matter data
+        </button>
+        {onSignOut ? (
+          <button
+            className="secondary-button"
+            onClick={() => void downloadEncryptedBackup()}
+          >
+            <Archive size={16} /> Download encrypted backup
+          </button>
+        ) : null}
+        {onSignOut ? (
+          <button className="secondary-button" onClick={() => void onSignOut()}>
+            Sign out and lock vault
+          </button>
+        ) : null}
+      </div>
     </section>
   );
 }
@@ -1324,12 +1750,14 @@ function EvidenceInspector({
   citation,
   document,
   fact,
-  onClose
+  onClose,
+  onOpenOriginal
 }: {
   citation: Citation;
   document: WorkspaceState["documents"][number] | null;
   fact: FactRecord | null;
   onClose: () => void;
+  onOpenOriginal?: () => Promise<void>;
 }) {
   const [verification, setVerification] = useState<"checking" | "verified" | "failed">(
     "checking"
@@ -1357,6 +1785,11 @@ function EvidenceInspector({
         </button>
       </div>
       <div className="inspector-quote">“{citation.exactQuote}”</div>
+      {onOpenOriginal ? (
+        <button className="secondary-button inspector-source-button" onClick={() => void onOpenOriginal()}>
+          <FileText size={16} /> Download original source
+        </button>
+      ) : null}
       <InspectorField
         label="Immutable file hash (SHA-256)"
         value={citation.originalFileSha256}

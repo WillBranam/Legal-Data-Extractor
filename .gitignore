@@ -5,6 +5,8 @@ node_modules
 public/ocr
 coverage
 *.log
+.verity-local-data
+.verity-local-backups
 .env
 .env.local
 .env.*.local

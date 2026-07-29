@@ -82,11 +82,17 @@ async function testWorkspace(): Promise<WorkspaceState> {
       name: "Test matter",
       court: "Test court",
       jurisdiction: "Test jurisdiction",
-      updatedAt: "2025-01-01T00:00:00Z"
+      updatedAt: "2025-01-01T00:00:00Z",
+      legalHold: false,
+      retentionPolicy: {
+        mode: "manual",
+        retainUntil: null
+      }
     },
     documents: [document],
     citations: [approvedCitation, pendingCitation],
-    facts
+    facts,
+    reviewDecisions: []
   };
 }
 

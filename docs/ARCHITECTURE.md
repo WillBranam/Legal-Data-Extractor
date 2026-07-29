@@ -1,5 +1,21 @@
 # Architecture
 
+## Supported deployment profiles
+
+The repository now has two deliberately separate operating profiles:
+
+- the public Vercel pilot, which remains limited to synthetic or de-identified
+  data and browser-local processing; and
+- the offline local appliance, which binds to loopback, stores originals and
+  workspace state in an encrypted local vault, and permits model calls only to
+  loopback Ollama.
+
+See [OFFLINE_ARCHITECTURE.md](./OFFLINE_ARCHITECTURE.md) for the local trust
+boundary, data lifecycle, and control ownership. See
+[HIPAA_READINESS_CHECKLIST.md](./HIPAA_READINESS_CHECKLIST.md) for the
+application controls and the organizational safeguards that remain the firm's
+responsibility.
+
 ## Current pilot boundary
 
 The Vercel deployment serves the application shell and a non-sensitive health

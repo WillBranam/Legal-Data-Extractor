@@ -1,15 +1,19 @@
 import type { Citation, EvidenceDocument, FactRecord } from "@/lib/types";
+import { readCanonicalByteRange } from "@/lib/evidence";
 
 function download(filename: string, blob: Blob): void {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
   anchor.download = filename;
+  anchor.hidden = true;
+  document.body.append(anchor);
   anchor.click();
-  URL.revokeObjectURL(url);
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
-function approvedRows(
+export function buildApprovedExportRows(
   facts: FactRecord[],
   citations: Citation[],
   documents: EvidenceDocument[]
@@ -18,10 +22,31 @@ function approvedRows(
   const documentMap = new Map(documents.map((document) => [document.id, document]));
   return facts
     .filter((fact) => fact.status === "approved")
-    .map((fact) => {
+    .flatMap((fact) => {
       const citation = citationMap.get(fact.citationIds[0]);
       const source = citation ? documentMap.get(citation.documentId) : undefined;
-      return {
+      if (
+        !citation ||
+        !source ||
+        citation.canonicalArtifactSha256 !== source.canonicalSha256 ||
+        citation.originalFileSha256 !== source.originalSha256
+      ) {
+        return [];
+      }
+      try {
+        if (
+          readCanonicalByteRange(
+            source.canonicalText,
+            citation.canonicalByteStart,
+            citation.canonicalByteEnd
+          ) !== citation.exactQuote
+        ) {
+          return [];
+        }
+      } catch {
+        return [];
+      }
+      return [{
         statement: fact.statement,
         type: fact.type,
         eventDate: fact.eventDate,
@@ -32,8 +57,13 @@ function approvedRows(
         byteStart: citation?.canonicalByteStart ?? "",
         byteEnd: citation?.canonicalByteEnd ?? "",
         canonicalSha256: citation?.canonicalArtifactSha256 ?? ""
-      };
+      }];
     });
+}
+
+export function spreadsheetSafeText(input: unknown): string {
+  const raw = String(input ?? "");
+  return /^[\t\r ]*[=+\-@]/.test(raw) || /^[\t\r]/.test(raw) ? `'${raw}` : raw;
 }
 
 export function exportJson(
@@ -43,7 +73,7 @@ export function exportJson(
 ): void {
   download(
     "approved-case-facts.json",
-    new Blob([JSON.stringify(approvedRows(facts, citations, documents), null, 2)], {
+    new Blob([JSON.stringify(buildApprovedExportRows(facts, citations, documents), null, 2)], {
       type: "application/json"
     })
   );
@@ -54,9 +84,12 @@ export function exportCsv(
   citations: Citation[],
   documents: EvidenceDocument[]
 ): void {
-  const rows = approvedRows(facts, citations, documents);
+  const rows = buildApprovedExportRows(facts, citations, documents);
   const headers = Object.keys(rows[0] ?? { statement: "" });
-  const value = (input: unknown) => `"${String(input ?? "").replaceAll('"', '""')}"`;
+  const value = (input: unknown) => {
+    const inert = spreadsheetSafeText(input);
+    return `"${inert.replaceAll('"', '""')}"`;
+  };
   const csv = [
     headers.map(value).join(","),
     ...rows.map((row) =>
@@ -72,7 +105,7 @@ export async function exportXlsx(
   documents: EvidenceDocument[]
 ): Promise<void> {
   const { default: JSZip } = await import("jszip");
-  const rows = approvedRows(facts, citations, documents);
+  const rows = buildApprovedExportRows(facts, citations, documents);
   const keys = Object.keys(rows[0] ?? { statement: "" });
   const xmlEscape = (value: unknown) =>
     String(value ?? "")
@@ -146,7 +179,7 @@ export async function exportDocx(
   documents: EvidenceDocument[]
 ): Promise<void> {
   const { Document, HeadingLevel, Packer, Paragraph, TextRun } = await import("docx");
-  const rows = approvedRows(facts, citations, documents);
+  const rows = buildApprovedExportRows(facts, citations, documents);
   const children = [
     new Paragraph({ text: "Approved Case Facts", heading: HeadingLevel.TITLE }),
     ...rows.flatMap((row, index) => [
