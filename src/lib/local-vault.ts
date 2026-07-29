@@ -20,7 +20,7 @@ import {
   writeFile
 } from "node:fs/promises";
 import path from "node:path";
-import { PassThrough, type Readable } from "node:stream";
+import { PassThrough, pipeline, type Readable } from "node:stream";
 import type { WorkspaceState } from "@/lib/types";
 
 const CONFIG_FILE = "vault-config.json";
@@ -355,12 +355,24 @@ export function readLocalWorkspaceSnapshot(
 export async function writeLocalWorkspace(
   session: Session,
   workspace: WorkspaceState,
-  expectedRevision: string | null
+  expectedRevision: string | null,
+  releaseLegalHold = false
 ): Promise<string> {
   return serializeWorkspaceOperation(async () => {
     if ((await localWorkspaceRevision()) !== expectedRevision) {
       throw new Error("WORKSPACE_CONFLICT");
     }
+    const existing = await readLocalWorkspace(session);
+    if (
+      existing?.matter.legalHold &&
+      !workspace.matter.legalHold &&
+      !releaseLegalHold
+    ) {
+      throw new Error("LEGAL_HOLD_ACTIVE");
+    }
+    const legalHoldChanged =
+      existing !== null &&
+      existing.matter.legalHold !== workspace.matter.legalHold;
     const serialized = Buffer.from(JSON.stringify(workspace), "utf8");
     const payload = encrypt(session.key, serialized);
     serialized.fill(0);
@@ -376,6 +388,18 @@ export async function writeLocalWorkspace(
       "matter",
       workspace.matter.id
     );
+    if (legalHoldChanged) {
+      await appendAuditEvent(
+        session.key,
+        session.username,
+        workspace.matter.legalHold
+          ? "matter.legal-hold-enable"
+          : "matter.legal-hold-release",
+        "success",
+        "matter",
+        workspace.matter.id
+      );
+    }
     const revision = await localWorkspaceRevision();
     if (!revision) throw new Error("WORKSPACE_WRITE_FAILED");
     return revision;
@@ -626,15 +650,8 @@ async function buildEncryptedLocalBackupStream(
       null
     );
   };
-  source.on("data", (chunk) => {
-    if (!output.write(chunk)) source.pause();
-  });
-  output.on("drain", () => source.resume());
-  source.on("end", () => {
-    void recordOutcome("success").then(() => output.end(), (error) => output.destroy(error));
-  });
-  source.on("error", (error) => {
-    void recordOutcome("failure").finally(() => output.destroy(error));
+  pipeline(source, output, (error) => {
+    void recordOutcome(error ? "failure" : "success").catch(() => undefined);
   });
   return output;
 }

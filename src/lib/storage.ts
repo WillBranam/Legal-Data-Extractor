@@ -7,6 +7,7 @@ const STATE_KEY = "current";
 const LEGACY_DEMO_MATTER_ID = "MN-2025-0421";
 export type StorageMode = "browser-local" | "encrypted-local-vault";
 let localWorkspaceRevision: string | null = null;
+let localWorkspaceLegalHold = false;
 
 async function database() {
   return openDB(DATABASE_NAME, 1, {
@@ -55,6 +56,7 @@ export async function loadWorkspace(
     };
     localWorkspaceRevision = body.revision;
     if (!body.workspace) return undefined;
+    localWorkspaceLegalHold = body.workspace.matter.legalHold;
     return normalizeWorkspace(body.workspace);
   }
   const db = await database();
@@ -79,7 +81,12 @@ export async function saveWorkspace(
       credentials: "same-origin",
       cache: "no-store",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ workspace: state, revision: localWorkspaceRevision })
+      body: JSON.stringify({
+        workspace: state,
+        revision: localWorkspaceRevision,
+        releaseLegalHold:
+          localWorkspaceLegalHold && state.matter.legalHold === false
+      })
     });
     const body = (await response.json().catch(() => ({}))) as {
       revision?: string;
@@ -89,6 +96,7 @@ export async function saveWorkspace(
       throw new Error(body.error ?? `LOCAL_WORKSPACE_HTTP_${response.status}`);
     }
     localWorkspaceRevision = body.revision ?? null;
+    localWorkspaceLegalHold = state.matter.legalHold;
     return;
   }
   const db = await database();
@@ -106,6 +114,7 @@ export async function clearWorkspace(
     });
     if (!response.ok) throw new Error(`LOCAL_WORKSPACE_HTTP_${response.status}`);
     localWorkspaceRevision = null;
+    localWorkspaceLegalHold = false;
     return;
   }
   const db = await database();

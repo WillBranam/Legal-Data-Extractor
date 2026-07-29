@@ -519,15 +519,6 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
   async function setLegalHold(enabled: boolean) {
     if (!workspace) return;
     try {
-      if (localMode) {
-        await recordLocalAuditEvent({
-          action: enabled
-            ? "matter.legal-hold-enable"
-            : "matter.legal-hold-release",
-          resourceType: "matter",
-          resourceId: workspace.matter.id
-        });
-      }
       await updateWorkspace({
         ...workspace,
         matter: {
