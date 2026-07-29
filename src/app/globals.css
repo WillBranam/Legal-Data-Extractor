@@ -18,9 +18,9 @@
   --red: #9a3f3f;
   --red-soft: #f8ecec;
   --shadow: 0 16px 40px rgb(19 34 53 / 9%);
-  --serif: Charter, "Iowan Old Style", "Palatino Linotype", Georgia, serif;
-  --sans: Aptos, "Segoe UI", ui-sans-serif, -apple-system, BlinkMacSystemFont, sans-serif;
-  --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --serif: "Charter", "Iowan Old Style", "Palatino Linotype", "Georgia", serif;
+  --sans: "Aptos", "Segoe UI", ui-sans-serif, -apple-system, "BlinkMacSystemFont", sans-serif;
+  --mono: "SFMono-Regular", "Consolas", "Liberation Mono", monospace;
 }
 
 * {
@@ -53,7 +53,7 @@ button {
 
 button:focus-visible,
 input:focus-visible {
-  outline: 3px solid rgb(49 95 134 / 28%);
+  outline: 3px solid var(--blue);
   outline-offset: 2px;
 }
 
