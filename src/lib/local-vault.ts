@@ -7,6 +7,7 @@ import {
   createCipheriv,
   createDecipheriv
 } from "node:crypto";
+import { createReadStream } from "node:fs";
 import {
   appendFile,
   chmod,
@@ -19,6 +20,7 @@ import {
   writeFile
 } from "node:fs/promises";
 import path from "node:path";
+import { PassThrough, type Readable } from "node:stream";
 import type { WorkspaceState } from "@/lib/types";
 
 const CONFIG_FILE = "vault-config.json";
@@ -29,6 +31,16 @@ const SESSION_IDLE_MS = 30 * 60 * 1000;
 const SESSION_ABSOLUTE_MS = 12 * 60 * 60 * 1000;
 const VERIFIER_CONTEXT = "verity-caseworks-local-vault-verifier-v1";
 const AUDIT_CONTEXT = "verity-caseworks-local-audit-v1";
+const MAX_BACKUP_SOURCE_BYTES = 10 * 1024 * 1024 * 1024;
+const MAX_BACKUP_FILES = 10_000;
+let auditQueue: Promise<void> = Promise.resolve();
+let workspaceQueue: Promise<void> = Promise.resolve();
+
+function serializeWorkspaceOperation<T>(operation: () => Promise<T>): Promise<T> {
+  const run = workspaceQueue.then(operation, operation);
+  workspaceQueue = run.then(() => undefined, () => undefined);
+  return run;
+}
 
 interface VaultConfig {
   version: 1;
@@ -320,43 +332,74 @@ export async function readLocalWorkspace(session: Session): Promise<WorkspaceSta
   }
 }
 
+export async function localWorkspaceRevision(): Promise<string | null> {
+  try {
+    return createHash("sha256")
+      .update(await readFile(await encryptedFilePath(WORKSPACE_FILE)))
+      .digest("hex");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+export function readLocalWorkspaceSnapshot(
+  session: Session
+): Promise<{ workspace: WorkspaceState | null; revision: string | null }> {
+  return serializeWorkspaceOperation(async () => ({
+    workspace: await readLocalWorkspace(session),
+    revision: await localWorkspaceRevision()
+  }));
+}
+
 export async function writeLocalWorkspace(
   session: Session,
-  workspace: WorkspaceState
-): Promise<void> {
-  const serialized = Buffer.from(JSON.stringify(workspace), "utf8");
-  const payload = encrypt(session.key, serialized);
-  serialized.fill(0);
-  await atomicPrivateWrite(
-    await encryptedFilePath(WORKSPACE_FILE),
-    JSON.stringify(payload)
-  );
-  await appendAuditEvent(
-    session.key,
-    session.username,
-    "workspace.write",
-    "success",
-    "matter",
-    workspace.matter.id
-  );
+  workspace: WorkspaceState,
+  expectedRevision: string | null
+): Promise<string> {
+  return serializeWorkspaceOperation(async () => {
+    if ((await localWorkspaceRevision()) !== expectedRevision) {
+      throw new Error("WORKSPACE_CONFLICT");
+    }
+    const serialized = Buffer.from(JSON.stringify(workspace), "utf8");
+    const payload = encrypt(session.key, serialized);
+    serialized.fill(0);
+    await atomicPrivateWrite(
+      await encryptedFilePath(WORKSPACE_FILE),
+      JSON.stringify(payload)
+    );
+    await appendAuditEvent(
+      session.key,
+      session.username,
+      "workspace.write",
+      "success",
+      "matter",
+      workspace.matter.id
+    );
+    const revision = await localWorkspaceRevision();
+    if (!revision) throw new Error("WORKSPACE_WRITE_FAILED");
+    return revision;
+  });
 }
 
 export async function deleteLocalWorkspace(session: Session): Promise<void> {
-  const workspace = await readLocalWorkspace(session);
-  if (workspace?.matter.legalHold) throw new Error("LEGAL_HOLD_ACTIVE");
-  try {
-    await unlink(await encryptedFilePath(WORKSPACE_FILE));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-  await appendAuditEvent(
-    session.key,
-    session.username,
-    "workspace.delete",
-    "success",
-    "matter",
-    null
-  );
+  await serializeWorkspaceOperation(async () => {
+    const workspace = await readLocalWorkspace(session);
+    if (workspace?.matter.legalHold) throw new Error("LEGAL_HOLD_ACTIVE");
+    try {
+      await unlink(await encryptedFilePath(WORKSPACE_FILE));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    await appendAuditEvent(
+      session.key,
+      session.username,
+      "workspace.delete",
+      "success",
+      "matter",
+      null
+    );
+  });
 }
 
 export async function storeOriginalDocument(
@@ -417,49 +460,54 @@ export async function appendAuditEvent(
   resourceType: string,
   resourceId: string | null
 ): Promise<void> {
-  const auditPath = await encryptedFilePath(AUDIT_FILE);
-  let previousHash: string | null = null;
-  let sequence = 1;
-  try {
-    const lines = (await readFile(auditPath, "utf8")).trim().split("\n").filter(Boolean);
-    if (lines.length > 0) {
-      const previous = JSON.parse(lines.at(-1)!) as AuditRecordBody & { hash: string };
-      previousHash = previous.hash;
-      sequence = previous.sequence + 1;
+  const run = auditQueue.then(async () => {
+    const auditPath = await encryptedFilePath(AUDIT_FILE);
+    let previousHash: string | null = null;
+    let sequence = 1;
+    try {
+      const lines = (await readFile(auditPath, "utf8")).trim().split("\n").filter(Boolean);
+      if (lines.length > 0) {
+        const previous = JSON.parse(lines.at(-1)!) as AuditRecordBody & { hash: string };
+        previousHash = previous.hash;
+        sequence = previous.sequence + 1;
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-  const body: AuditRecordBody = {
-    version: 1,
-    sequence,
-    occurredAt: new Date().toISOString(),
-    actor,
-    action,
-    outcome,
-    resourceType,
-    resourceId: resourceId
-      ? createHmac("sha256", key)
-          .update("verity-caseworks-audit-resource-id-v1")
-          .update(resourceId)
-          .digest("hex")
-      : null,
-    previousHash
-  };
-  const hash = createHmac("sha256", key)
-    .update(AUDIT_CONTEXT)
-    .update(JSON.stringify(body))
-    .digest("hex");
-  await appendFile(auditPath, `${JSON.stringify({ ...body, hash })}\n`, {
-    encoding: "utf8",
-    mode: 0o600
+    const body: AuditRecordBody = {
+      version: 1,
+      sequence,
+      occurredAt: new Date().toISOString(),
+      actor,
+      action,
+      outcome,
+      resourceType,
+      resourceId: resourceId
+        ? createHmac("sha256", key)
+            .update("verity-caseworks-audit-resource-id-v1")
+            .update(resourceId)
+            .digest("hex")
+        : null,
+      previousHash
+    };
+    const hash = createHmac("sha256", key)
+      .update(AUDIT_CONTEXT)
+      .update(JSON.stringify(body))
+      .digest("hex");
+    await appendFile(auditPath, `${JSON.stringify({ ...body, hash })}\n`, {
+      encoding: "utf8",
+      mode: 0o600
+    });
+    await chmod(auditPath, 0o600);
   });
-  await chmod(auditPath, 0o600);
+  auditQueue = run.catch(() => undefined);
+  return run;
 }
 
 export async function verifyAuditChain(
   session: Session
 ): Promise<{ valid: boolean; records: number }> {
+  await auditQueue;
   let text: string;
   try {
     text = await readFile(await encryptedFilePath(AUDIT_FILE), "utf8");
@@ -518,21 +566,21 @@ export async function localVaultFileStats(): Promise<{
   };
 }
 
-export async function createEncryptedLocalBackup(session: Session): Promise<Buffer> {
-  await appendAuditEvent(
-    session.key,
-    session.username,
-    "backup.create",
-    "success",
-    "vault",
-    null
-  );
+async function buildEncryptedLocalBackupStream(
+  session: Session
+): Promise<Readable> {
   const { default: JSZip } = await import("jszip");
   const zip = new JSZip();
   const directory = await ensureDataDirectory();
+  const entries: Array<{ archivePath: string; sourcePath: string; size: number }> = [];
   for (const filename of [CONFIG_FILE, WORKSPACE_FILE, AUDIT_FILE]) {
     try {
-      zip.file(filename, await readFile(path.join(directory, filename)));
+      const sourcePath = path.join(directory, filename);
+      entries.push({
+        archivePath: filename,
+        sourcePath,
+        size: (await stat(sourcePath)).size
+      });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
@@ -541,17 +589,70 @@ export async function createEncryptedLocalBackup(session: Session): Promise<Buff
   try {
     for (const filename of await readdir(originalsPath)) {
       if (!filename.endsWith(".enc.json")) continue;
-      zip.file(
-        `${ORIGINALS_DIRECTORY}/${filename}`,
-        await readFile(path.join(originalsPath, filename))
-      );
+      const sourcePath = path.join(originalsPath, filename);
+      entries.push({
+        archivePath: `${ORIGINALS_DIRECTORY}/${filename}`,
+        sourcePath,
+        size: (await stat(sourcePath)).size
+      });
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  return zip.generateAsync({
+  const totalBytes = entries.reduce((total, entry) => total + entry.size, 0);
+  if (entries.length > MAX_BACKUP_FILES || totalBytes > MAX_BACKUP_SOURCE_BYTES) {
+    throw new Error("BACKUP_SIZE_LIMIT_EXCEEDED");
+  }
+  for (const entry of entries) {
+    zip.file(entry.archivePath, createReadStream(entry.sourcePath));
+  }
+  const source = zip.generateNodeStream({
     type: "nodebuffer",
+    streamFiles: true,
     compression: "DEFLATE",
     compressionOptions: { level: 6 }
   });
+  const output = new PassThrough();
+  let outcomeRecorded = false;
+  const recordOutcome = async (outcome: "success" | "failure") => {
+    if (outcomeRecorded) return;
+    outcomeRecorded = true;
+    await appendAuditEvent(
+      session.key,
+      session.username,
+      "backup.create",
+      outcome,
+      "vault",
+      null
+    );
+  };
+  source.on("data", (chunk) => {
+    if (!output.write(chunk)) source.pause();
+  });
+  output.on("drain", () => source.resume());
+  source.on("end", () => {
+    void recordOutcome("success").then(() => output.end(), (error) => output.destroy(error));
+  });
+  source.on("error", (error) => {
+    void recordOutcome("failure").finally(() => output.destroy(error));
+  });
+  return output;
+}
+
+export async function createEncryptedLocalBackupStream(
+  session: Session
+): Promise<Readable> {
+  try {
+    return await buildEncryptedLocalBackupStream(session);
+  } catch (error) {
+    await appendAuditEvent(
+      session.key,
+      session.username,
+      "backup.create",
+      "failure",
+      "vault",
+      null
+    );
+    throw error;
+  }
 }

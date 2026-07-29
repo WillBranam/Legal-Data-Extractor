@@ -4,9 +4,16 @@ import path from "node:path";
 const minimumNode = [20, 18, 0];
 const currentNode = process.versions.node.split(".").map(Number);
 const model = process.env.LOCAL_LLM_MODEL?.trim() || "qwen3:8b";
-const endpoint = new URL(process.env.LOCAL_LLM_BASE_URL || "http://127.0.0.1:11434");
 const failures = [];
 const passes = [];
+let endpoint;
+try {
+  endpoint = new URL(
+    process.env.LOCAL_LLM_BASE_URL || "http://127.0.0.1:11434"
+  );
+} catch {
+  failures.push("LOCAL_LLM_BASE_URL must be a valid URL");
+}
 
 if (
   !/^[a-zA-Z0-9][a-zA-Z0-9._/:+-]{0,127}$/.test(model) ||
@@ -27,9 +34,9 @@ function atLeast(current, minimum) {
 if (atLeast(currentNode, minimumNode)) passes.push(`Node ${process.versions.node}`);
 else failures.push(`Node ${minimumNode.join(".")} or newer is required`);
 
-const validEndpoint =
+const validEndpoint = Boolean(endpoint) &&
   endpoint.protocol === "http:" &&
-  ["127.0.0.1", "localhost", "::1"].includes(endpoint.hostname);
+  ["127.0.0.1", "localhost", "[::1]"].includes(endpoint.hostname);
 if (validEndpoint) {
   passes.push(`Local model endpoint ${endpoint.origin}`);
 } else {

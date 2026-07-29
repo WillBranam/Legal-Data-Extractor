@@ -14,10 +14,17 @@ internet:
 npm ci
 ollama pull qwen3:8b
 npm run local:build
+npm run local:prepare-runtime
+npm run local:verify-runtime
 ```
 
 The application, OCR worker, OCR language data, and model weights can then run
 without internet access.
+
+The runtime-preparation step removes development-only dependencies from the
+appliance checkout after the build. The verification step audits the production
+dependency tree. Run `npm ci` again before rebuilding or running developer
+tooling.
 
 ## Preflight
 

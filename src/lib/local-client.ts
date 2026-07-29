@@ -38,6 +38,18 @@ async function localRequest<T>(url: string, init?: RequestInit): Promise<T> {
   return body;
 }
 
+function downloadBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename.replaceAll(/[\\/]/g, "_");
+  anchor.hidden = true;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
 export function getLocalRuntimeStatus(): Promise<LocalRuntimeStatus> {
   return localRequest<LocalRuntimeStatus>("/api/local/status");
 }
@@ -94,22 +106,21 @@ export async function downloadOriginalFile(
     const body = (await response.json().catch(() => ({}))) as { error?: string };
     throw new Error(body.error ?? `LOCAL_API_HTTP_${response.status}`);
   }
-  const url = URL.createObjectURL(await response.blob());
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename.replaceAll(/[\\/]/g, "_");
-  anchor.click();
-  URL.revokeObjectURL(url);
+  downloadBlob(await response.blob(), filename);
 }
 
 export async function extractDocumentWithLocalModel(
   document: EvidenceDocument
 ): Promise<LocalExtractionProposal[]> {
+  const body = JSON.stringify({ document });
+  if (new TextEncoder().encode(body).byteLength > 20 * 1024 * 1024) {
+    throw new Error("EXTRACTION_REQUEST_TOO_LARGE");
+  }
   const result = await localRequest<{ proposals: LocalExtractionProposal[] }>(
     "/api/local/extract",
     {
       method: "POST",
-      body: JSON.stringify({ document })
+      body
     }
   );
   return result.proposals;
@@ -156,14 +167,9 @@ export async function downloadEncryptedBackup(): Promise<void> {
     const body = (await response.json().catch(() => ({}))) as { error?: string };
     throw new Error(body.error ?? `LOCAL_API_HTTP_${response.status}`);
   }
-  const blob = await response.blob();
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download =
+  const filename =
     response.headers
       .get("content-disposition")
       ?.match(/filename="([^"]+)"/)?.[1] ?? "verity-encrypted-backup.zip";
-  anchor.click();
-  URL.revokeObjectURL(url);
+  downloadBlob(await response.blob(), filename);
 }

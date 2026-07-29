@@ -58,12 +58,14 @@ Real PHI must not be used until:
 ## Latest repository validation
 
 - Local and public production builds: passed.
-- Lint and 11 automated tests: passed.
+- Lint and 12 automated tests: passed.
 - Local readiness with loopback Ollama and `qwen3:8b`: passed.
 - Production dependency audit (`npm audit --omit=dev`): zero known
   vulnerabilities.
 - Development-only lint/build dependency audit: nine high-severity
   `brace-expansion` findings remain because the registry's proposed forced
-  remediation breaks the current ESLint matcher API. This tooling must remain
-  outside the production appliance, and the dependency chain must be upgraded
+  remediation breaks the current ESLint matcher API. The documented
+  `local:prepare-runtime` step prunes those packages from the appliance after
+  building, and `local:verify-runtime` audits the resulting production
+  dependency boundary. The development dependency chain must still be upgraded
   when a compatible fix is available.

@@ -4,7 +4,8 @@ import { setupLocalVault } from "@/lib/local-vault";
 import {
   assertLocalRequest,
   localApiError,
-  localSessionCookie
+  localSessionCookie,
+  readBoundedJson
 } from "@/lib/local-request";
 
 export const runtime = "nodejs";
@@ -17,7 +18,9 @@ const setupSchema = z.object({
 export async function POST(request: Request) {
   try {
     assertLocalRequest(request, true);
-    const input = setupSchema.parse(await request.json());
+    const input = setupSchema.parse(
+      await readBoundedJson(request, 4096, "SETUP_REQUEST_TOO_LARGE")
+    );
     const token = await setupLocalVault(input);
     return NextResponse.json(
       { status: "configured" },

@@ -7,6 +7,7 @@ import {
   LOCAL_SESSION_COOKIE,
   localApiError,
   localSessionCookie,
+  readBoundedJson,
   readCookie
 } from "@/lib/local-request";
 
@@ -19,8 +20,10 @@ const loginSchema = z.object({
 
 const attempts = new Map<string, { count: number; resetAt: number }>();
 
-function checkRateLimit(request: Request): void {
-  const key = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "loopback";
+const RATE_LIMIT_KEY = "loopback";
+
+function checkRateLimit(): void {
+  const key = RATE_LIMIT_KEY;
   const now = Date.now();
   const current = attempts.get(key);
   if (!current || current.resetAt <= now) {
@@ -34,8 +37,10 @@ function checkRateLimit(request: Request): void {
 export async function POST(request: Request) {
   try {
     assertLocalRequest(request, true);
-    checkRateLimit(request);
-    const input = loginSchema.parse(await request.json());
+    checkRateLimit();
+    const input = loginSchema.parse(
+      await readBoundedJson(request, 4096, "LOGIN_REQUEST_TOO_LARGE")
+    );
     const token = await loginLocalVault(input);
     if (!token) {
       return NextResponse.json(
@@ -43,7 +48,7 @@ export async function POST(request: Request) {
         { status: 401, headers: { "Cache-Control": "no-store" } }
       );
     }
-    attempts.clear();
+    attempts.delete(RATE_LIMIT_KEY);
     return NextResponse.json(
       { status: "authenticated" },
       {

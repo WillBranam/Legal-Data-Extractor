@@ -1,24 +1,30 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import type { WorkspaceState } from "@/lib/types";
+import { workspaceStateSchema } from "@/lib/local-schemas";
 import {
   deleteLocalWorkspace,
-  readLocalWorkspace,
+  readLocalWorkspaceSnapshot,
   writeLocalWorkspace
 } from "@/lib/local-vault";
-import { localApiError, requireLocalSession } from "@/lib/local-request";
+import {
+  localApiError,
+  readBoundedJson,
+  requireLocalSession
+} from "@/lib/local-request";
 
 export const runtime = "nodejs";
 
 const workspaceEnvelopeSchema = z.object({
-  workspace: z.unknown()
+  workspace: workspaceStateSchema,
+  revision: z.string().length(64).nullable()
 });
 
 export async function GET(request: Request) {
   try {
     const session = await requireLocalSession(request);
+    const snapshot = await readLocalWorkspaceSnapshot(session);
     return NextResponse.json(
-      { workspace: await readLocalWorkspace(session) },
+      snapshot,
       { headers: { "Cache-Control": "no-store" } }
     );
   } catch (error) {
@@ -29,12 +35,12 @@ export async function GET(request: Request) {
 export async function PUT(request: Request) {
   try {
     const session = await requireLocalSession(request, true);
-    const contentLength = Number(request.headers.get("content-length") ?? "0");
-    if (contentLength > 64 * 1024 * 1024) throw new Error("WORKSPACE_TOO_LARGE");
-    const { workspace } = workspaceEnvelopeSchema.parse(await request.json());
-    await writeLocalWorkspace(session, workspace as WorkspaceState);
+    const { workspace, revision } = workspaceEnvelopeSchema.parse(
+      await readBoundedJson(request, 64 * 1024 * 1024, "WORKSPACE_TOO_LARGE")
+    );
+    const nextRevision = await writeLocalWorkspace(session, workspace, revision);
     return NextResponse.json(
-      { status: "saved" },
+      { status: "saved", revision: nextRevision },
       { headers: { "Cache-Control": "no-store" } }
     );
   } catch (error) {

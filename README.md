@@ -58,6 +58,8 @@ cd Legal-Data-Extractor
 npm ci
 ollama pull qwen3:8b
 npm run local:build
+npm run local:prepare-runtime
+npm run local:verify-runtime
 ```
 
 If you already have the repository folder, start with `cd` into that folder and
@@ -65,6 +67,11 @@ run `npm ci`; you do not need to clone it again.
 
 `npm ci` also prepares the self-hosted OCR worker, WebAssembly cores, and
 English language data in `public/ocr`.
+
+`local:prepare-runtime` removes development-only lint, test, and build packages
+after the production build is complete. `local:verify-runtime` audits only the
+installed production dependency boundary. Run `npm ci` again before doing
+development work or rebuilding.
 
 ### 2. Start the local model
 
@@ -121,7 +128,8 @@ hold, and incident procedures.
 
 ### Local development
 
-Use this only with synthetic or de-identified data:
+This command explicitly keeps `PHI_MODE=disabled`; use it only with synthetic or
+de-identified data:
 
 ```bash
 npm install

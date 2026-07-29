@@ -9,6 +9,7 @@ const MAX_DOCUMENT_BYTES = 16 * 1024 * 1024;
 const MAX_PAGES = 500;
 const MAX_FACTS = 100;
 const MAX_CHUNK_CHARACTERS = 18_000;
+const MAX_EXTRACTION_DURATION_MS = 4 * 60 * 1000;
 
 const factTypes = [
   "Event",
@@ -50,7 +51,10 @@ export function validatedLocalModelEndpoint(
   value = process.env.LOCAL_LLM_BASE_URL ?? DEFAULT_OLLAMA_URL
 ): URL {
   const url = new URL(value);
-  if (url.protocol !== "http:" || !["127.0.0.1", "localhost", "::1"].includes(url.hostname)) {
+  if (
+    url.protocol !== "http:" ||
+    !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)
+  ) {
     throw new Error("LOCAL_MODEL_MUST_USE_LOOPBACK");
   }
   if (url.username || url.password || url.search || url.hash) {
@@ -214,16 +218,17 @@ export async function extractWithLocalModel(
   if (document.pages.length > MAX_PAGES) throw new Error("DOCUMENT_PAGE_LIMIT_EXCEEDED");
   const proposals: LocalExtractionProposal[] = [];
   const seen = new Set<string>();
+  const deadline = Date.now() + MAX_EXTRACTION_DURATION_MS;
 
   for (const page of document.pages) {
-    if (proposals.length >= MAX_FACTS) break;
+    if (proposals.length >= MAX_FACTS || Date.now() >= deadline) break;
     const pageText = readCanonicalByteRange(
       document.canonicalText,
       page.canonicalByteStart,
       page.canonicalByteEnd
     );
     for (const chunk of chunks(pageText)) {
-      if (proposals.length >= MAX_FACTS) break;
+      if (proposals.length >= MAX_FACTS || Date.now() >= deadline) break;
       const response = await structuredChat({
         system: [
           "You extract proposed litigation facts from untrusted source text.",

@@ -245,39 +245,46 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
 
   async function runQuery() {
     if (!workspace || question.trim().length === 0) return;
-    let queryFacts = workspace.facts;
-    if (localMode) {
-      if (!localStatus?.model.reachable || !localStatus.model.installed) {
-        const unavailable: QueryAnswer = {
-          status: "insufficient_evidence",
-          question,
-          claims: []
-        };
-        setAnswer(unavailable);
-        setNotice("The approved record was not queried because the local model is unavailable.");
-        setView("query");
-        return;
+    try {
+      let queryFacts = workspace.facts;
+      if (localMode) {
+        if (!localStatus?.model.reachable || !localStatus.model.installed) {
+          const unavailable: QueryAnswer = {
+            status: "insufficient_evidence",
+            question,
+            claims: []
+          };
+          setAnswer(unavailable);
+          setNotice("The approved record was not queried because the local model is unavailable.");
+          setView("query");
+          return;
+        }
+        const selectedIds = new Set(
+          await selectFactsWithLocalModel({
+            matterId: workspace.matter.id,
+            question,
+            facts: workspace.facts
+          })
+        );
+        queryFacts = workspace.facts.filter((fact) => selectedIds.has(fact.id));
       }
-      const selectedIds = new Set(
-        await selectFactsWithLocalModel({
-          matterId: workspace.matter.id,
-          question,
-          facts: workspace.facts
-        })
+      const result = await queryApprovedFacts({
+        question,
+        facts: queryFacts,
+        citations: workspace.citations,
+        documents: workspace.documents,
+        selectAllApproved: localMode,
+        ...(localMode ? { limit: queryFacts.length } : {})
+      });
+      setAnswer(result);
+      setView("query");
+      if (result.claims[0]?.citationIds[0]) {
+        setSelectedCitationId(result.claims[0].citationIds[0]);
+      }
+    } catch (error) {
+      setNotice(
+        error instanceof Error ? error.message : "The approved record could not be queried."
       );
-      queryFacts = workspace.facts.filter((fact) => selectedIds.has(fact.id));
-    }
-    const result = await queryApprovedFacts({
-      question: localMode ? "" : question,
-      facts: queryFacts,
-      citations: workspace.citations,
-      documents: workspace.documents,
-      selectAllApproved: localMode
-    });
-    setAnswer(result);
-    setView("query");
-    if (result.claims[0]?.citationIds[0]) {
-      setSelectedCitationId(result.claims[0].citationIds[0]);
     }
   }
 
@@ -312,15 +319,19 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
       ],
       matter: { ...workspace.matter, updatedAt: new Date().toISOString() }
     };
-    await updateWorkspace(next);
-    if (localMode) {
-      await recordLocalAuditEvent({
-        action: status === "approved" ? "review.approve" : "review.reject",
-        resourceType: "fact",
-        resourceId: factId
-      });
+    try {
+      if (localMode) {
+        await recordLocalAuditEvent({
+          action: status === "approved" ? "review.approve" : "review.reject",
+          resourceType: "fact",
+          resourceId: factId
+        });
+      }
+      await updateWorkspace(next);
+      setNotice(status === "approved" ? "Fact approved and queryable." : "Fact rejected.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "The review could not be saved.");
     }
-    setNotice(status === "approved" ? "Fact approved and queryable." : "Fact rejected.");
   }
 
   async function importFiles(files: FileList | null) {
@@ -507,24 +518,28 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
 
   async function setLegalHold(enabled: boolean) {
     if (!workspace) return;
-    await updateWorkspace({
-      ...workspace,
-      matter: {
-        ...workspace.matter,
-        legalHold: enabled,
-        updatedAt: new Date().toISOString()
+    try {
+      if (localMode) {
+        await recordLocalAuditEvent({
+          action: enabled
+            ? "matter.legal-hold-enable"
+            : "matter.legal-hold-release",
+          resourceType: "matter",
+          resourceId: workspace.matter.id
+        });
       }
-    });
-    if (localMode) {
-      await recordLocalAuditEvent({
-        action: enabled
-          ? "matter.legal-hold-enable"
-          : "matter.legal-hold-release",
-        resourceType: "matter",
-        resourceId: workspace.matter.id
+      await updateWorkspace({
+        ...workspace,
+        matter: {
+          ...workspace.matter,
+          legalHold: enabled,
+          updatedAt: new Date().toISOString()
+        }
       });
+      setNotice(enabled ? "Legal hold enabled." : "Legal hold released.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "The legal hold could not be changed.");
     }
-    setNotice(enabled ? "Legal hold enabled." : "Legal hold released.");
   }
 
   if (localMode && localStatus && !localStatus.authenticated) {
@@ -716,7 +731,11 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
             ) : null}
 
             {view === "exports" ? (
-              <ExportsView workspace={workspace} auditExports={localMode} />
+              <ExportsView
+                workspace={workspace}
+                auditExports={localMode}
+                onError={setNotice}
+              />
             ) : null}
 
             {view === "settings" ? (
@@ -825,7 +844,11 @@ function LocalAccessScreen({
               evidence unrecoverable.
             </small>
           ) : null}
-          {error ? <div className="access-error">{error.replaceAll("_", " ")}</div> : null}
+          {error ? (
+            <div className="access-error" role="alert">
+              {error.replaceAll("_", " ")}
+            </div>
+          ) : null}
           <button className="primary-button" type="submit" disabled={working}>
             <FolderLock size={17} />
             {working ? "Opening vault…" : configured ? "Unlock vault" : "Create vault"}
@@ -1519,24 +1542,30 @@ function DocumentsView({
 
 function ExportsView({
   workspace,
-  auditExports
+  auditExports,
+  onError
 }: {
   workspace: WorkspaceState;
   auditExports: boolean;
+  onError: (message: string) => void;
 }) {
   const args = [workspace.facts, workspace.citations, workspace.documents] as const;
   const runExport = async (
     format: "csv" | "xlsx" | "json" | "docx",
     action: () => void | Promise<void>
   ) => {
-    if (auditExports) {
-      await recordLocalAuditEvent({
-        action: `export.${format}`,
-        resourceType: "export",
-        resourceId: workspace.matter.id
-      });
+    try {
+      await action();
+      if (auditExports) {
+        await recordLocalAuditEvent({
+          action: `export.${format}`,
+          resourceType: "export",
+          resourceId: workspace.matter.id
+        });
+      }
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "The export could not be created.");
     }
-    await action();
   };
   const formats = [
     {

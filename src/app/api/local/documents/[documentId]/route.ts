@@ -1,5 +1,9 @@
 import { NextResponse } from "next/server";
-import { localApiError, requireLocalSession } from "@/lib/local-request";
+import {
+  localApiError,
+  readBoundedBody,
+  requireLocalSession
+} from "@/lib/local-request";
 import { readOriginalDocument, storeOriginalDocument } from "@/lib/local-vault";
 
 export const runtime = "nodejs";
@@ -33,10 +37,11 @@ export async function PUT(
 ) {
   try {
     const session = await requireLocalSession(request, true);
-    const declaredLength = Number(request.headers.get("content-length") ?? "0");
-    if (declaredLength > MAX_SOURCE_BYTES) throw new Error("SOURCE_FILE_TOO_LARGE");
-    const bytes = Buffer.from(await request.arrayBuffer());
-    if (bytes.byteLength > MAX_SOURCE_BYTES) throw new Error("SOURCE_FILE_TOO_LARGE");
+    const bytes = await readBoundedBody(
+      request,
+      MAX_SOURCE_BYTES,
+      "SOURCE_FILE_TOO_LARGE"
+    );
     const { documentId } = await context.params;
     await storeOriginalDocument(session, documentId, bytes);
     bytes.fill(0);

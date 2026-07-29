@@ -6,11 +6,14 @@ function download(filename: string, blob: Blob): void {
   const anchor = document.createElement("a");
   anchor.href = url;
   anchor.download = filename;
+  anchor.hidden = true;
+  document.body.append(anchor);
   anchor.click();
-  URL.revokeObjectURL(url);
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
-function approvedRows(
+export function buildApprovedExportRows(
   facts: FactRecord[],
   citations: Citation[],
   documents: EvidenceDocument[]
@@ -70,7 +73,7 @@ export function exportJson(
 ): void {
   download(
     "approved-case-facts.json",
-    new Blob([JSON.stringify(approvedRows(facts, citations, documents), null, 2)], {
+    new Blob([JSON.stringify(buildApprovedExportRows(facts, citations, documents), null, 2)], {
       type: "application/json"
     })
   );
@@ -81,7 +84,7 @@ export function exportCsv(
   citations: Citation[],
   documents: EvidenceDocument[]
 ): void {
-  const rows = approvedRows(facts, citations, documents);
+  const rows = buildApprovedExportRows(facts, citations, documents);
   const headers = Object.keys(rows[0] ?? { statement: "" });
   const value = (input: unknown) => {
     const inert = spreadsheetSafeText(input);
@@ -102,7 +105,7 @@ export async function exportXlsx(
   documents: EvidenceDocument[]
 ): Promise<void> {
   const { default: JSZip } = await import("jszip");
-  const rows = approvedRows(facts, citations, documents);
+  const rows = buildApprovedExportRows(facts, citations, documents);
   const keys = Object.keys(rows[0] ?? { statement: "" });
   const xmlEscape = (value: unknown) =>
     String(value ?? "")
@@ -176,7 +179,7 @@ export async function exportDocx(
   documents: EvidenceDocument[]
 ): Promise<void> {
   const { Document, HeadingLevel, Packer, Paragraph, TextRun } = await import("docx");
-  const rows = approvedRows(facts, citations, documents);
+  const rows = buildApprovedExportRows(facts, citations, documents);
   const children = [
     new Paragraph({ text: "Approved Case Facts", heading: HeadingLevel.TITLE }),
     ...rows.flatMap((row, index) => [

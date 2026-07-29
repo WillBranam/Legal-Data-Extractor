@@ -1,6 +1,6 @@
 # Hardening evidence context
 
-- Source root: `/Users/williambranam/Desktop/Freelance/Legal-Data-Extractor`
+- Source root: `<repository root>`
 - Source revision: `8fcfede8f848712bc3b6b6d7cacc9590294aa9c3`
 - Source drift: present; the local-appliance implementation is the current working tree.
 - Security scan: `6d76cc34-7222-4013-b714-d9902aaa1ea6`
@@ -16,4 +16,3 @@ Evidence:
 - `C2`: the public pilot had no LLM and used first-sentence extraction.
 - `C3`: citation verification already enforced canonical hashes and exact UTF-8
   quotations.
-
