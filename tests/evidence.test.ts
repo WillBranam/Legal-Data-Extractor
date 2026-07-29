@@ -23,6 +23,21 @@ async function documentFor(text: string): Promise<EvidenceDocument> {
     canonicalByteLength: utf8ByteLength(text),
     parserVersion: "test",
     pageCount: 1,
+    pages: [
+      {
+        pageNumber: 1,
+        extractionMethod: "native-text",
+        canonicalByteStart: 0,
+        canonicalByteEnd: bytes.byteLength,
+        width: null,
+        height: null,
+        imageSha256: null,
+        ocrConfidence: null
+      }
+    ],
+    processingDurationMs: 1,
+    ocrPageCount: 0,
+    ocrMeanConfidence: null,
     ingestedAt: "2025-01-01T00:00:00Z",
     processingState: "ready"
   };

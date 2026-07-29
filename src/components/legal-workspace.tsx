@@ -6,11 +6,14 @@ import {
   CheckCircle2,
   ChevronDown,
   CircleHelp,
+  Cpu,
   Database,
   Download,
   FileCheck2,
   FileText,
+  FileUp,
   FolderLock,
+  FolderUp,
   Gauge,
   Gavel,
   LayoutDashboard,
@@ -31,17 +34,22 @@ import {
   useRef,
   useState
 } from "react";
-import { buildDemoWorkspace } from "@/lib/demo";
-import { createCitation, verifyCitation } from "@/lib/evidence";
+import {
+  createCitation,
+  readCanonicalByteRange,
+  verifyCitation
+} from "@/lib/evidence";
 import {
   exportCsv,
   exportDocx,
   exportJson,
   exportXlsx
 } from "@/lib/exports";
-import { parseLocalFile } from "@/lib/parsers";
+import { createLocalOcrSession } from "@/lib/ocr";
+import { parseLocalFile, type ParseProgress } from "@/lib/parsers";
 import { queryApprovedFacts } from "@/lib/query";
 import { clearWorkspace, loadWorkspace, saveWorkspace } from "@/lib/storage";
+import { createEmptyWorkspace } from "@/lib/workspace";
 import type {
   Citation,
   FactRecord,
@@ -78,38 +86,48 @@ function formatDate(value: string): string {
   }).format(new Date(value));
 }
 
-function initialQuestion() {
-  return "What happened between January and March 2025?";
+function formatDuration(durationMs: number): string {
+  if (durationMs < 1000) return `${Math.round(durationMs)} ms`;
+  return `${(durationMs / 1000).toFixed(1)} s`;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+interface ImportPerformance {
+  files: number;
+  bytes: number;
+  pages: number;
+  ocrPages: number;
+  durationMs: number;
 }
 
 export function LegalWorkspace() {
   const [workspace, setWorkspace] = useState<WorkspaceState | null>(null);
   const [view, setView] = useState<View>("overview");
-  const [question, setQuestion] = useState(initialQuestion);
+  const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState<QueryAnswer | null>(null);
   const [selectedCitationId, setSelectedCitationId] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [importProgress, setImportProgress] = useState<ParseProgress | null>(null);
+  const [importPerformance, setImportPerformance] =
+    useState<ImportPerformance | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     let active = true;
     async function initialize() {
       const saved = await loadWorkspace();
-      const state = saved ?? (await buildDemoWorkspace());
+      const state = saved ?? createEmptyWorkspace();
       if (!saved) await saveWorkspace(state);
       if (!active) return;
       setWorkspace(state);
       setSelectedCitationId(state.citations[0]?.id ?? null);
-      setAnswer(
-        await queryApprovedFacts({
-          question: initialQuestion(),
-          facts: state.facts,
-          citations: state.citations,
-          documents: state.documents
-        })
-      );
     }
     void initialize();
     return () => {
@@ -169,7 +187,7 @@ export function LegalWorkspace() {
           ? {
               ...fact,
               status,
-              reviewer: "Alex Morgan",
+              reviewer: "Local reviewer",
               reviewedAt: new Date().toISOString()
             }
           : fact
@@ -184,45 +202,78 @@ export function LegalWorkspace() {
     if (!workspace || !files || files.length === 0) return;
     setImporting(true);
     setNotice(null);
+    setImportPerformance(null);
+    const startedAt = performance.now();
+    const ocrSession = createLocalOcrSession();
     const documents = [...workspace.documents];
     const citations = [...workspace.citations];
     const facts = [...workspace.facts];
-    for (const file of Array.from(files)) {
-      try {
-        const document = await parseLocalFile(file);
-        documents.push(document);
-        if (document.processingState === "ready" && document.canonicalText.length > 0) {
-          const candidate =
-            document.canonicalText
-              .split(/(?<=[.!?])\s+/)
-              .find((sentence) => sentence.trim().length >= 30)
-              ?.trim() ?? document.canonicalText.slice(0, 240).trim();
-          if (candidate) {
-            const citation = await createCitation({
-              id: crypto.randomUUID(),
-              document,
-              exactQuote: candidate,
-              pageNumber: document.pageCount === 1 ? 1 : null,
-              structuralPath: "local-import/first-evidence-span"
-            });
-            citations.push(citation);
-            facts.push({
-              id: crypto.randomUUID(),
-              matterId: workspace.matter.id,
-              type: "Evidence",
-              statement: candidate,
-              eventDate: null,
-              confidence: 0.65,
-              status: "pending",
-              citationIds: [citation.id],
-              reviewer: null,
-              reviewedAt: null
-            });
+    const importedDocuments: WorkspaceState["documents"] = [];
+    const errors: string[] = [];
+    try {
+      for (const file of Array.from(files)) {
+        try {
+          const document = await parseLocalFile(file, {
+            ocrSession,
+            onProgress: setImportProgress
+          });
+          importedDocuments.push(document);
+          documents.push(document);
+          if (
+            document.processingState === "ready" &&
+            document.canonicalText.length > 0
+          ) {
+            const sourcePage = document.pages.find(
+              (page) => page.canonicalByteEnd > page.canonicalByteStart
+            );
+            const pageText = sourcePage
+              ? readCanonicalByteRange(
+                  document.canonicalText,
+                  sourcePage.canonicalByteStart,
+                  sourcePage.canonicalByteEnd
+                )
+              : "";
+            const candidate =
+              pageText
+                .split(/(?<=[.!?])\s+/)
+                .find((sentence) => sentence.trim().length >= 30)
+                ?.trim() ?? pageText.slice(0, 240).trim();
+            if (candidate) {
+              const citation = await createCitation({
+                id: crypto.randomUUID(),
+                document,
+                exactQuote: candidate,
+                pageNumber: sourcePage?.pageNumber ?? null,
+                structuralPath: sourcePage
+                  ? `local-import/page-${sourcePage.pageNumber}/first-evidence-span`
+                  : "local-import/first-evidence-span"
+              });
+              citations.push(citation);
+              facts.push({
+                id: crypto.randomUUID(),
+                matterId: workspace.matter.id,
+                type: "Evidence",
+                statement: candidate,
+                eventDate: null,
+                confidence: Math.min(
+                  0.8,
+                  document.ocrMeanConfidence === null
+                    ? 0.7
+                    : document.ocrMeanConfidence
+                ),
+                status: "pending",
+                citationIds: [citation.id],
+                reviewer: null,
+                reviewedAt: null
+              });
+            }
           }
+        } catch {
+          errors.push(file.name);
         }
-      } catch {
-        setNotice(`Could not parse ${file.name}. The original file was not transmitted.`);
       }
+    } finally {
+      await ocrSession.terminate().catch(() => undefined);
     }
     await updateWorkspace({
       ...workspace,
@@ -232,27 +283,40 @@ export function LegalWorkspace() {
       matter: { ...workspace.matter, updatedAt: new Date().toISOString() }
     });
     setImporting(false);
+    setImportProgress(null);
     setView("documents");
-    setNotice(`${files.length} file${files.length === 1 ? "" : "s"} processed locally.`);
+    setImportPerformance({
+      files: importedDocuments.length,
+      bytes: importedDocuments.reduce((total, document) => total + document.size, 0),
+      pages: importedDocuments.reduce(
+        (total, document) => total + document.pageCount,
+        0
+      ),
+      ocrPages: importedDocuments.reduce(
+        (total, document) => total + document.ocrPageCount,
+        0
+      ),
+      durationMs: performance.now() - startedAt
+    });
+    setNotice(
+      errors.length === 0
+        ? `${importedDocuments.length} file${importedDocuments.length === 1 ? "" : "s"} processed locally.`
+        : `${importedDocuments.length} processed locally; ${errors.length} could not be read. No source file was transmitted.`
+    );
+    if (fileInputRef.current) fileInputRef.current.value = "";
     if (folderInputRef.current) folderInputRef.current.value = "";
   }
 
-  async function resetDemo() {
+  async function clearLocalMatter() {
     await clearWorkspace();
-    const state = await buildDemoWorkspace();
+    const state = createEmptyWorkspace();
     await saveWorkspace(state);
     setWorkspace(state);
-    setSelectedCitationId(state.citations[0].id);
-    setQuestion(initialQuestion());
-    setAnswer(
-      await queryApprovedFacts({
-        question: initialQuestion(),
-        facts: state.facts,
-        citations: state.citations,
-        documents: state.documents
-      })
-    );
-    setNotice("Local pilot data reset.");
+    setSelectedCitationId(null);
+    setQuestion("");
+    setAnswer(null);
+    setImportPerformance(null);
+    setNotice("Local matter data cleared.");
   }
 
   if (!workspace) {
@@ -349,8 +413,8 @@ export function LegalWorkspace() {
               <CircleHelp size={19} />
             </button>
             <div className="user-block">
-              <strong>Alex Morgan</strong>
-              <span>Counsel</span>
+              <strong>Local workspace</strong>
+              <span>Authorized user</span>
             </div>
           </div>
         </header>
@@ -421,6 +485,7 @@ export function LegalWorkspace() {
                       value={question}
                       onChange={(event) => setQuestion(event.target.value)}
                       aria-label="Ask a question about the matter"
+                      placeholder="Ask about approved evidence…"
                     />
                     <button type="submit">Ask</button>
                   </form>
@@ -507,7 +572,10 @@ export function LegalWorkspace() {
               <DocumentsView
                 workspace={workspace}
                 importing={importing}
-                inputRef={folderInputRef}
+                importProgress={importProgress}
+                importPerformance={importPerformance}
+                fileInputRef={fileInputRef}
+                folderInputRef={folderInputRef}
                 onImport={importFiles}
               />
             ) : null}
@@ -539,7 +607,7 @@ export function LegalWorkspace() {
             ) : null}
 
             {view === "settings" ? (
-              <SettingsView onReset={resetDemo} />
+              <SettingsView onReset={clearLocalMatter} />
             ) : null}
           </main>
 
@@ -682,12 +750,18 @@ function ReviewTable({
 function DocumentsView({
   workspace,
   importing,
-  inputRef,
+  importProgress,
+  importPerformance,
+  fileInputRef,
+  folderInputRef,
   onImport
 }: {
   workspace: WorkspaceState;
   importing: boolean;
-  inputRef: React.RefObject<HTMLInputElement | null>;
+  importProgress: ParseProgress | null;
+  importPerformance: ImportPerformance | null;
+  fileInputRef: React.RefObject<HTMLInputElement | null>;
+  folderInputRef: React.RefObject<HTMLInputElement | null>;
   onImport: (files: FileList | null) => Promise<void>;
 }) {
   return (
@@ -697,20 +771,37 @@ function DocumentsView({
           <span className="small-label">Private evidence storage</span>
           <h1>Documents</h1>
           <p>
-            Files are parsed and stored in this browser. No file upload request is
-            made to Vercel or an LLM.
+            Files are parsed in this browser; only canonical evidence records are
+            stored locally. No file upload request is made to Vercel or an LLM.
           </p>
         </div>
-        <button
-          className="primary-button"
-          onClick={() => inputRef.current?.click()}
-          disabled={importing}
-        >
-          <Upload size={17} />
-          {importing ? "Processing locally…" : "Add folder or files"}
-        </button>
+        <div className="import-actions">
+          <button
+            className="secondary-button"
+            onClick={() => folderInputRef.current?.click()}
+            disabled={importing}
+          >
+            <FolderUp size={17} />
+            Add folder
+          </button>
+          <button
+            className="primary-button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={importing}
+          >
+            <FileUp size={17} />
+            {importing ? "Processing locally…" : "Add files"}
+          </button>
+        </div>
         <input
-          ref={inputRef}
+          ref={fileInputRef}
+          type="file"
+          multiple
+          className="visually-hidden"
+          onChange={(event) => void onImport(event.target.files)}
+        />
+        <input
+          ref={folderInputRef}
           type="file"
           multiple
           className="visually-hidden"
@@ -724,11 +815,43 @@ function DocumentsView({
         <div>
           <strong>Zero document egress is enforced by design.</strong>
           <p>
-            Native PDF, DOCX, TXT, EML, and MSG parsing runs locally. Image-only
-            files are marked as needing protected OCR.
+            Native text extraction and bundled OCR run inside this browser. OCR
+            workers, WebAssembly, and English language data are served by this app;
+            document bytes and page images are never uploaded.
           </p>
         </div>
       </div>
+      {importing && importProgress ? (
+        <div className="ocr-progress" role="status" aria-live="polite">
+          <Cpu size={20} />
+          <div>
+            <strong>{importProgress.message}</strong>
+            <span>
+              {importProgress.pageNumber && importProgress.totalPages
+                ? `Page ${importProgress.pageNumber} of ${importProgress.totalPages}`
+                : "Preparing local evidence"}
+            </span>
+            <progress max={1} value={importProgress.progress} />
+          </div>
+        </div>
+      ) : null}
+      {importPerformance ? (
+        <div className="performance-summary" aria-label="Last import performance">
+          <span className="small-label">Last local import</span>
+          <strong>{formatDuration(importPerformance.durationMs)}</strong>
+          <span>{importPerformance.files} files</span>
+          <span>{importPerformance.pages} pages</span>
+          <span>{importPerformance.ocrPages} OCR pages</span>
+          <span>{formatBytes(importPerformance.bytes)}</span>
+          <span>
+            {importPerformance.pages > 0
+              ? `${(
+                  importPerformance.durationMs / importPerformance.pages / 1000
+                ).toFixed(2)} s/page`
+              : "No pages"}
+          </span>
+        </div>
+      ) : null}
       <div className="document-list">
         <div className="document-list-head">
           <span>Document</span>
@@ -736,7 +859,13 @@ function DocumentsView({
           <span>Canonical artifact</span>
           <span>Ingested</span>
         </div>
-        {workspace.documents.map((document) => (
+        {workspace.documents.length === 0 ? (
+          <div className="document-empty">
+            <Upload size={22} />
+            <strong>No evidence imported</strong>
+            <span>Add scanned PDFs, images, or native documents to begin.</span>
+          </div>
+        ) : workspace.documents.map((document) => (
           <article className="document-row" key={document.id}>
             <div className="document-name">
               <FileText size={19} />
@@ -744,15 +873,20 @@ function DocumentsView({
                 <strong>{document.name}</strong>
                 <span>
                   {(document.size / 1024).toFixed(1)} KB · {document.pageCount}{" "}
-                  {document.pageCount === 1 ? "page" : "pages"}
+                  {document.pageCount === 1 ? "page" : "pages"} ·{" "}
+                  {formatDuration(document.processingDurationMs)}
                 </span>
               </div>
             </div>
             <span className={`state ${document.processingState}`}>
               {document.processingState === "ready"
-                ? "Ready"
+                ? document.ocrPageCount > 0
+                  ? `Ready · ${document.ocrPageCount} OCR`
+                  : "Ready · native text"
                 : document.processingState === "needs-ocr"
-                  ? "Protected OCR required"
+                  ? "Awaiting local OCR"
+                  : document.processingState === "ocr-failed"
+                    ? "OCR review required"
                   : "Unsupported"}
             </span>
             <div className="hash-cell">
@@ -836,6 +970,12 @@ function SettingsView({ onReset }: { onReset: () => Promise<void> }) {
           detail="Source bytes and canonical artifacts never leave this device."
         />
         <SettingRow
+          icon={Cpu}
+          title="On-device OCR"
+          value="Bundled and enabled"
+          detail="Self-hosted Tesseract WebAssembly and language data process scans locally."
+        />
+        <SettingRow
           icon={ShieldCheck}
           title="Natural-language query"
           value="Deterministic local retrieval"
@@ -849,7 +989,7 @@ function SettingsView({ onReset }: { onReset: () => Promise<void> }) {
         />
       </div>
       <button className="secondary-button reset-button" onClick={() => void onReset()}>
-        <RotateCcw size={16} /> Reset local pilot data
+        <RotateCcw size={16} /> Clear local matter data
       </button>
     </section>
   );

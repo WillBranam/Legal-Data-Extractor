@@ -6,7 +6,8 @@ The Vercel deployment serves the application shell and a non-sensitive health
 endpoint. Evidence processing occurs entirely in the browser:
 
 ```text
-local file -> browser parser -> canonical UTF-8 artifact
+local file -> browser parser -> native text or local OCR
+           -> canonical UTF-8 artifact + page provenance
            -> SHA-256 + exact byte spans
            -> draft review -> approved fact index
            -> local query plan -> verified claims
@@ -14,6 +15,29 @@ local file -> browser parser -> canonical UTF-8 artifact
 
 IndexedDB is the pilot source of truth. A restrictive Content Security Policy
 allows connections only to the deployment origin.
+
+## On-device OCR
+
+PDF.js first reads each PDF page's native text layer. Pages below the minimum
+usable-text threshold are rendered to an in-memory canvas and processed by a
+single reusable Tesseract.js worker. Image inputs take the same OCR path.
+
+The worker script, SIMD/fallback WebAssembly cores, and English trained data are
+copied from pinned dependencies at install time and served from `/ocr` on the
+application origin. No OCR runtime dependency is downloaded from a public CDN.
+
+Each OCR page records:
+
+- extraction method
+- canonical UTF-8 page boundaries
+- rendered image pixel hash
+- rendered dimensions
+- OCR confidence
+- parser and OCR version
+
+Canvases are released after each page. Files are processed sequentially to bound
+browser memory use, while the OCR worker is reused across a batch to avoid
+reloading the core and language model.
 
 ## Citation invariant
 

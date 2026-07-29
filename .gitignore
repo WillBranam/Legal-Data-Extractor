@@ -2,6 +2,7 @@
 .next
 .vercel
 node_modules
+public/ocr
 coverage
 *.log
 .env

@@ -36,6 +36,11 @@ PHI_MODE=disabled
 The public pilot must not receive provider keys, database credentials, or cloud
 storage credentials.
 
+`npm install` runs the OCR asset preparation script. Confirm that the deployed
+application serves `/ocr/worker.min.js`, `/ocr/lang/eng.traineddata.gz`, and the
+WebAssembly core selected by the browser. The Content Security Policy must keep
+`connect-src` and `worker-src` restricted to the application origin.
+
 Before enabling any protected processing, obtain the required contractual and
 security approvals for Vercel and every PHI-touching service. Replace the
 browser-only pilot boundary only through a separately reviewed production

@@ -9,8 +9,11 @@ and exact, reproducible UTF-8 citations.
 The deployed pilot is intentionally **zero egress**:
 
 - Source documents are parsed in the browser.
-- Source bytes, canonical text, citations, review state, and query state are
-  stored in browser IndexedDB.
+- Scanned PDF pages and supported images are OCRed in the browser with
+  self-hosted Tesseract WebAssembly and English language data.
+- Source bytes are read transiently and are not persisted by the pilot.
+  Canonical text, hashes, citations, review state, and query state are stored in
+  browser IndexedDB.
 - The server exposes no upload or model endpoint.
 - Natural-language retrieval is deterministic and restricted to approved facts.
 - Displayed quotations are rehydrated from canonical byte ranges and checked
@@ -41,13 +44,24 @@ npm run build
 
 ## Supported pilot inputs
 
-- Native PDF
+- Native and scanned PDF
 - DOCX
 - TXT
 - Individual EML and MSG files
+- JPEG, PNG, and TIFF images
 
-Image-only documents are recognized but require a separately configured
-protected OCR worker. Original files are never transmitted by this deployment.
+Native PDF text remains the fast path. Pages without usable native text are
+rendered by PDF.js and passed to a reusable on-device OCR worker. The app records
+the OCR engine version, page confidence, rendered-page hash, dimensions,
+canonical UTF-8 byte range, and total processing time.
+
+OCR runtime files are copied from pinned npm packages into `public/ocr` during
+`npm install`. They are served from the same origin and are intentionally not
+fetched from a third-party CDN.
+
+The Documents screen reports elapsed time, pages, OCR pages, bytes, and seconds
+per page for the most recent import. Start performance testing with synthetic or
+de-identified scans before using production case data.
 
 ## Deployment
 

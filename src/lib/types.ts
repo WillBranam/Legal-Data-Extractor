@@ -26,8 +26,23 @@ export interface EvidenceDocument {
   canonicalByteLength: number;
   parserVersion: string;
   pageCount: number;
+  pages: EvidencePageArtifact[];
+  processingDurationMs: number;
+  ocrPageCount: number;
+  ocrMeanConfidence: number | null;
   ingestedAt: string;
-  processingState: "ready" | "needs-ocr" | "unsupported";
+  processingState: "ready" | "needs-ocr" | "ocr-failed" | "unsupported";
+}
+
+export interface EvidencePageArtifact {
+  pageNumber: number;
+  extractionMethod: "native-text" | "ocr";
+  canonicalByteStart: number;
+  canonicalByteEnd: number;
+  width: number | null;
+  height: number | null;
+  imageSha256: string | null;
+  ocrConfidence: number | null;
 }
 
 export interface Citation {
