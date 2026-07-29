@@ -1,4 +1,5 @@
 import type { Citation, EvidenceDocument, FactRecord } from "@/lib/types";
+import { readCanonicalByteRange } from "@/lib/evidence";
 
 function download(filename: string, blob: Blob): void {
   const url = URL.createObjectURL(blob);
@@ -18,10 +19,31 @@ function approvedRows(
   const documentMap = new Map(documents.map((document) => [document.id, document]));
   return facts
     .filter((fact) => fact.status === "approved")
-    .map((fact) => {
+    .flatMap((fact) => {
       const citation = citationMap.get(fact.citationIds[0]);
       const source = citation ? documentMap.get(citation.documentId) : undefined;
-      return {
+      if (
+        !citation ||
+        !source ||
+        citation.canonicalArtifactSha256 !== source.canonicalSha256 ||
+        citation.originalFileSha256 !== source.originalSha256
+      ) {
+        return [];
+      }
+      try {
+        if (
+          readCanonicalByteRange(
+            source.canonicalText,
+            citation.canonicalByteStart,
+            citation.canonicalByteEnd
+          ) !== citation.exactQuote
+        ) {
+          return [];
+        }
+      } catch {
+        return [];
+      }
+      return [{
         statement: fact.statement,
         type: fact.type,
         eventDate: fact.eventDate,
@@ -32,8 +54,13 @@ function approvedRows(
         byteStart: citation?.canonicalByteStart ?? "",
         byteEnd: citation?.canonicalByteEnd ?? "",
         canonicalSha256: citation?.canonicalArtifactSha256 ?? ""
-      };
+      }];
     });
+}
+
+export function spreadsheetSafeText(input: unknown): string {
+  const raw = String(input ?? "");
+  return /^[\t\r ]*[=+\-@]/.test(raw) || /^[\t\r]/.test(raw) ? `'${raw}` : raw;
 }
 
 export function exportJson(
@@ -56,7 +83,10 @@ export function exportCsv(
 ): void {
   const rows = approvedRows(facts, citations, documents);
   const headers = Object.keys(rows[0] ?? { statement: "" });
-  const value = (input: unknown) => `"${String(input ?? "").replaceAll('"', '""')}"`;
+  const value = (input: unknown) => {
+    const inert = spreadsheetSafeText(input);
+    return `"${inert.replaceAll('"', '""')}"`;
+  };
   const csv = [
     headers.map(value).join(","),
     ...rows.map((row) =>

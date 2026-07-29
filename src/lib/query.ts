@@ -64,12 +64,16 @@ export async function queryApprovedFacts(input: {
   citations: Citation[];
   documents: EvidenceDocument[];
   limit?: number;
+  selectAllApproved?: boolean;
 }): Promise<QueryAnswer> {
   const citationMap = new Map(input.citations.map((citation) => [citation.id, citation]));
   const documentMap = new Map(input.documents.map((document) => [document.id, document]));
   const candidates = input.facts
     .filter((fact) => fact.status === "approved")
-    .map((fact) => ({ fact, score: scoreFact(input.question, fact) }))
+    .map((fact) => ({
+      fact,
+      score: input.selectAllApproved ? 1 + fact.confidence : scoreFact(input.question, fact)
+    }))
     .filter(({ score }) => score > 0)
     .sort((left, right) => right.score - left.score)
     .slice(0, input.limit ?? 3);

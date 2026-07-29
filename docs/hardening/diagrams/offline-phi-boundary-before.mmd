@@ -1,0 +1,8 @@
+flowchart LR
+    User["Local reviewer"] --> Browser["Vercel browser pilot"]
+    Files["Untrusted case files"] --> Browser
+    Browser --> OCR["Browser OCR"]
+    Browser --> IDB["Unencrypted IndexedDB state"]
+    IDB --> Review["Unauthenticated review"]
+    Review --> Query["Keyword query"]
+    Query --> Export["Local exports"]

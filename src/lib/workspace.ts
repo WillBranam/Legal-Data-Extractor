@@ -7,10 +7,16 @@ export function createEmptyWorkspace(now = new Date()): WorkspaceState {
       name: "New local matter",
       court: "Not set",
       jurisdiction: "Not set",
-      updatedAt: now.toISOString()
+      updatedAt: now.toISOString(),
+      legalHold: false,
+      retentionPolicy: {
+        mode: "manual",
+        retainUntil: null
+      }
     },
     documents: [],
     citations: [],
-    facts: []
+    facts: [],
+    reviewDecisions: []
   };
 }

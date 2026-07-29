@@ -12,6 +12,10 @@ import type {
 const MIN_NATIVE_TEXT_CHARACTERS = 20;
 const PDF_OCR_SCALE = 2;
 const MAX_IMAGE_OCR_DIMENSION = 3000;
+export const MAX_SOURCE_FILE_BYTES = 100 * 1024 * 1024;
+export const MAX_PDF_PAGES = 500;
+const MAX_DECODED_IMAGE_PIXELS = 50_000_000;
+const MAX_PDF_RENDER_PIXELS = 40_000_000;
 
 export interface ParseProgress {
   fileName: string;
@@ -164,6 +168,10 @@ async function parsePdf(
     useWorkerFetch: false,
     isEvalSupported: false
   }).promise;
+  if (document.numPages > MAX_PDF_PAGES) {
+    await document.destroy();
+    throw new Error(`PDF exceeds the ${MAX_PDF_PAGES}-page processing limit.`);
+  }
   const pages: ParsedPage[] = [];
   let ocrFailed = false;
 
@@ -181,6 +189,9 @@ async function parsePdf(
       .map((item) => ("str" in item ? item.str : ""))
       .join(" ");
     const viewport = page.getViewport({ scale: PDF_OCR_SCALE });
+    if (viewport.width * viewport.height > MAX_PDF_RENDER_PIXELS) {
+      throw new Error("PDF page exceeds the local rendering pixel limit.");
+    }
 
     if (!needsOcr(nativeText)) {
       pages.push({
@@ -285,6 +296,10 @@ async function parseImage(
       };
     }
   }
+  if (bitmap.width * bitmap.height > MAX_DECODED_IMAGE_PIXELS) {
+    bitmap.close();
+    throw new Error("Image exceeds the local decoded-pixel limit.");
+  }
   const canvas = window.document.createElement("canvas");
   const scale = Math.min(
     1,
@@ -382,6 +397,11 @@ export async function parseLocalFile(
     progress: 0,
     message: `Reading ${file.name} locally`
   });
+  if (file.size > MAX_SOURCE_FILE_BYTES) {
+    throw new Error(
+      `File exceeds the ${Math.round(MAX_SOURCE_FILE_BYTES / 1024 / 1024)} MB local processing limit.`
+    );
+  }
   const buffer = await file.arrayBuffer();
   const extension = file.name.toLowerCase().split(".").pop() ?? "";
   const ownedOcrSession = options.ocrSession ? null : createLocalOcrSession();

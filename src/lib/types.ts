@@ -13,6 +13,11 @@ export interface Matter {
   court: string;
   jurisdiction: string;
   updatedAt: string;
+  legalHold: boolean;
+  retentionPolicy: {
+    mode: "manual" | "retain-until";
+    retainUntil: string | null;
+  };
 }
 
 export interface EvidenceDocument {
@@ -71,11 +76,21 @@ export interface FactRecord {
   reviewedAt: string | null;
 }
 
+export interface ReviewDecision {
+  id: string;
+  factId: string;
+  reviewer: string;
+  decision: "approved" | "rejected";
+  priorStatus: ReviewStatus;
+  occurredAt: string;
+}
+
 export interface WorkspaceState {
   matter: Matter;
   documents: EvidenceDocument[];
   citations: Citation[];
   facts: FactRecord[];
+  reviewDecisions: ReviewDecision[];
 }
 
 export interface VerificationResult {
