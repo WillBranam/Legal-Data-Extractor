@@ -2,10 +2,10 @@
 
 import {
   Archive,
+  ArrowRight,
   Check,
   CheckCircle2,
-  ChevronDown,
-  CircleHelp,
+  ChevronRight,
   Cpu,
   Database,
   Download,
@@ -64,13 +64,22 @@ const navItems: Array<{
   label: string;
   icon: typeof LayoutDashboard;
 }> = [
-  { id: "overview", label: "Matter overview", icon: LayoutDashboard },
+  { id: "overview", label: "Home", icon: LayoutDashboard },
   { id: "documents", label: "Documents", icon: FileText },
-  { id: "review", label: "Review queue", icon: FileCheck2 },
+  { id: "review", label: "Review", icon: FileCheck2 },
   { id: "query", label: "Ask the case", icon: MessageSquareText },
-  { id: "exports", label: "Exports", icon: Download },
+  { id: "exports", label: "Export", icon: Download },
   { id: "settings", label: "Settings", icon: Settings }
 ];
+
+const viewLabels: Record<View, string> = {
+  overview: "Home",
+  documents: "Documents",
+  review: "Review",
+  query: "Ask the case",
+  exports: "Export",
+  settings: "Settings"
+};
 
 function shortHash(hash: string): string {
   return `${hash.slice(0, 16)}…${hash.slice(-12)}`;
@@ -127,7 +136,7 @@ export function LegalWorkspace() {
       if (!saved) await saveWorkspace(state);
       if (!active) return;
       setWorkspace(state);
-      setSelectedCitationId(state.citations[0]?.id ?? null);
+      setSelectedCitationId(null);
     }
     void initialize();
     return () => {
@@ -328,13 +337,6 @@ export function LegalWorkspace() {
     );
   }
 
-  const citationsById = new Map(
-    workspace.citations.map((citation) => [citation.id, citation])
-  );
-  const documentsById = new Map(
-    workspace.documents.map((document) => [document.id, document])
-  );
-
   return (
     <div className="app-shell">
       <aside className={`sidebar ${sidebarOpen ? "sidebar-open" : ""}`}>
@@ -368,7 +370,7 @@ export function LegalWorkspace() {
           ))}
         </nav>
         <div className="matter-brief">
-          <span className="small-label">Matter</span>
+          <span className="small-label">Open matter</span>
           <strong>{workspace.matter.name}</strong>
           <dl>
             <div>
@@ -376,12 +378,8 @@ export function LegalWorkspace() {
               <dd>{workspace.matter.id}</dd>
             </div>
             <div>
-              <dt>Court</dt>
-              <dd>{workspace.matter.court}</dd>
-            </div>
-            <div>
-              <dt>Jurisdiction</dt>
-              <dd>{workspace.matter.jurisdiction}</dd>
+              <dt>Documents</dt>
+              <dd>{workspace.documents.length}</dd>
             </div>
             <div>
               <dt>Last updated</dt>
@@ -390,8 +388,8 @@ export function LegalWorkspace() {
           </dl>
         </div>
         <div className="local-boundary">
-          <FolderLock size={16} />
-          <span>Local evidence mode</span>
+          <span className="boundary-dot" aria-hidden />
+          <span>Files stay on this device</span>
         </div>
       </aside>
 
@@ -404,17 +402,18 @@ export function LegalWorkspace() {
           >
             <Menu size={22} />
           </button>
-          <button className="matter-selector">
-            {workspace.matter.name}
-            <ChevronDown size={16} />
-          </button>
+          <div className="breadcrumbs" aria-label="Current location">
+            <span>{workspace.matter.name}</span>
+            <ChevronRight size={14} />
+            <strong>{viewLabels[view]}</strong>
+          </div>
           <div className="topbar-actions">
-            <button className="icon-button" aria-label="Help">
-              <CircleHelp size={19} />
-            </button>
-            <div className="user-block">
-              <strong>Local workspace</strong>
-              <span>Authorized user</span>
+            <div className="custody-status">
+              <ShieldCheck size={16} />
+              <span>
+                <strong>Private workspace</strong>
+                Original files do not leave this device
+              </span>
             </div>
           </div>
         </header>
@@ -431,141 +430,47 @@ export function LegalWorkspace() {
 
         <div className={`content-frame ${selectedCitation ? "with-inspector" : ""}`}>
           <main className="main-content">
-            {view === "overview" || view === "query" ? (
-              <>
-                <section className="metrics" aria-label="Matter status">
-                  <Metric
-                    icon={FileText}
-                    label="Imported documents"
-                    value={String(workspace.documents.length)}
-                    detail="Stored in this browser"
-                  />
-                  <Metric
-                    icon={ShieldCheck}
-                    label="Approved facts"
-                    value={String(approvedCount)}
-                    detail="Queryable records"
-                    tone="green"
-                  />
-                  <Metric
-                    icon={FileCheck2}
-                    label="Pending review"
-                    value={String(pendingFacts.length)}
-                    detail="Requires attention"
-                    tone="copper"
-                  />
-                  <Metric
-                    icon={Database}
-                    label="Evidence boundary"
-                    value="Local"
-                    detail="Zero document egress"
-                    tone="green"
-                  />
-                </section>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className="visually-hidden"
+              onChange={(event) => void importFiles(event.target.files)}
+            />
+            <input
+              ref={folderInputRef}
+              type="file"
+              multiple
+              className="visually-hidden"
+              onChange={(event) => void importFiles(event.target.files)}
+              {...({ webkitdirectory: "" } as Record<string, string>)}
+            />
 
-                <section className="query-panel">
-                  <div className="section-title">
-                    <div>
-                      <span className="small-label">Ask the case</span>
-                      <h1>Query only approved evidence</h1>
-                    </div>
-                    <span className="privacy-note">
-                      <FolderLock size={14} /> Runs on this device
-                    </span>
-                  </div>
-                  <form
-                    className="query-form"
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      void runQuery();
-                    }}
-                  >
-                    <Search size={19} aria-hidden />
-                    <input
-                      value={question}
-                      onChange={(event) => setQuestion(event.target.value)}
-                      aria-label="Ask a question about the matter"
-                      placeholder="Ask about approved evidence…"
-                    />
-                    <button type="submit">Ask</button>
-                  </form>
-                  <p className="query-help">
-                    Answers are assembled from approved records. Unsupported questions
-                    return insufficient evidence.
-                  </p>
+            {view === "overview" ? (
+              <OverviewView
+                workspace={workspace}
+                pendingCount={pendingFacts.length}
+                approvedCount={approvedCount}
+                importing={importing}
+                importProgress={importProgress}
+                onAddFiles={() => fileInputRef.current?.click()}
+                onAddFolder={() => folderInputRef.current?.click()}
+                onNavigate={setView}
+              />
+            ) : null}
 
-                  <div className="answer-header">
-                    <span className="small-label">Verified answer</span>
-                    <span
-                      className={`answer-status ${
-                        answer?.status === "verified" ? "verified" : ""
-                      }`}
-                    >
-                      {answer?.status === "verified" ? (
-                        <>
-                          <CheckCircle2 size={15} /> Evidence checks passed
-                        </>
-                      ) : (
-                        "Insufficient evidence"
-                      )}
-                    </span>
-                  </div>
-                  {answer?.claims.length ? (
-                    <div className="claim-list">
-                      {answer.claims.map((claim, index) => {
-                        const citation = citationsById.get(claim.citationIds[0]);
-                        const document = citation
-                          ? documentsById.get(citation.documentId)
-                          : undefined;
-                        return citation && document ? (
-                          <button
-                            key={claim.factId}
-                            className={`claim ${
-                              selectedCitationId === citation.id ? "selected" : ""
-                            }`}
-                            onClick={() => setSelectedCitationId(citation.id)}
-                          >
-                            <span className="claim-number">{index + 1}</span>
-                            <span className="claim-body">
-                              <span className="claim-statement">{claim.statement}</span>
-                              <span className="quote">“{citation.exactQuote}”</span>
-                              <span className="claim-source">
-                                <span>
-                                  {document.name}
-                                  {citation.pageNumber
-                                    ? ` · page ${citation.pageNumber}`
-                                    : ""}
-                                </span>
-                                <span>
-                                  UTF-8 bytes {citation.canonicalByteStart}–
-                                  {citation.canonicalByteEnd}
-                                </span>
-                              </span>
-                            </span>
-                            <span className="byte-verified">
-                              <CheckCircle2 size={16} /> Byte verified
-                            </span>
-                          </button>
-                        ) : null;
-                      })}
-                    </div>
-                  ) : (
-                    <div className="empty-answer">
-                      <ShieldCheck size={24} />
-                      <strong>No verified answer is available.</strong>
-                      <p>Try a narrower question or approve relevant draft facts.</p>
-                    </div>
-                  )}
-                </section>
-
-                <ReviewTable
-                  facts={pendingFacts}
-                  citations={workspace.citations}
-                  documents={workspace.documents}
-                  onReview={reviewFact}
-                  onSelectCitation={setSelectedCitationId}
-                />
-              </>
+            {view === "query" ? (
+              <QueryView
+                workspace={workspace}
+                approvedCount={approvedCount}
+                question={question}
+                answer={answer}
+                selectedCitationId={selectedCitationId}
+                onQuestionChange={setQuestion}
+                onRunQuery={runQuery}
+                onSelectCitation={setSelectedCitationId}
+                onNavigate={setView}
+              />
             ) : null}
 
             {view === "documents" ? (
@@ -576,7 +481,6 @@ export function LegalWorkspace() {
                 importPerformance={importPerformance}
                 fileInputRef={fileInputRef}
                 folderInputRef={folderInputRef}
-                onImport={importFiles}
               />
             ) : null}
 
@@ -622,6 +526,422 @@ export function LegalWorkspace() {
         </div>
       </section>
     </div>
+  );
+}
+
+function OverviewView({
+  workspace,
+  pendingCount,
+  approvedCount,
+  importing,
+  importProgress,
+  onAddFiles,
+  onAddFolder,
+  onNavigate
+}: {
+  workspace: WorkspaceState;
+  pendingCount: number;
+  approvedCount: number;
+  importing: boolean;
+  importProgress: ParseProgress | null;
+  onAddFiles: () => void;
+  onAddFolder: () => void;
+  onNavigate: (view: View) => void;
+}) {
+  const hasDocuments = workspace.documents.length > 0;
+  const hasExtractedFacts = workspace.facts.length > 0;
+  const reviewComplete =
+    hasExtractedFacts && pendingCount === 0 && approvedCount > 0;
+
+  const nextAction = !hasDocuments
+    ? {
+        eyebrow: "Start here",
+        title: "Add the case file",
+        description:
+          "Choose a folder or select individual documents. Text extraction and OCR happen in this browser.",
+        action: onAddFolder,
+        actionLabel: "Choose a case folder",
+        secondaryAction: onAddFiles,
+        secondaryLabel: "Select files instead"
+      }
+    : pendingCount > 0
+      ? {
+          eyebrow: "Next step",
+          title: `Review ${pendingCount} proposed ${pendingCount === 1 ? "fact" : "facts"}`,
+          description:
+            "Confirm each proposed fact against its exact source quotation before it can be used in an answer.",
+          action: () => onNavigate("review"),
+          actionLabel: "Open review queue",
+          secondaryAction: () => onNavigate("documents"),
+          secondaryLabel: "View documents"
+        }
+      : approvedCount > 0
+        ? {
+            eyebrow: "Matter ready",
+            title: "Ask a question about the record",
+            description:
+              "Answers use approved facts only. Every claim opens to a byte-matched source quotation.",
+            action: () => onNavigate("query"),
+            actionLabel: "Ask the case",
+            secondaryAction: () => onNavigate("exports"),
+            secondaryLabel: "Export approved facts"
+          }
+        : {
+            eyebrow: "Check the record",
+            title: "Review imported documents",
+            description:
+              "The documents are processed, but no reviewable facts are available yet. Check their evidence state.",
+            action: () => onNavigate("documents"),
+            actionLabel: "View documents",
+            secondaryAction: onAddFiles,
+            secondaryLabel: "Add more files"
+          };
+
+  return (
+    <section className="overview-page">
+      <header className="matter-heading">
+        <div>
+          <span className="small-label">Matter workspace</span>
+          <h1>{workspace.matter.name}</h1>
+          <p>
+            Build a reviewed, source-linked record before relying on any extracted
+            information.
+          </p>
+        </div>
+        <dl className="matter-meta">
+          <div>
+            <dt>Matter ID</dt>
+            <dd>{workspace.matter.id}</dd>
+          </div>
+          <div>
+            <dt>Last activity</dt>
+            <dd>{formatDate(workspace.matter.updatedAt)}</dd>
+          </div>
+        </dl>
+      </header>
+
+      <ol className="case-path" aria-label="Matter preparation progress">
+        <CaseStep
+          number="1"
+          label="Add documents"
+          detail={`${workspace.documents.length} in matter`}
+          state={hasDocuments ? "complete" : "current"}
+        />
+        <CaseStep
+          number="2"
+          label="Extract evidence"
+          detail={hasExtractedFacts ? `${workspace.facts.length} proposed facts` : "Not started"}
+          state={
+            hasExtractedFacts ? "complete" : hasDocuments ? "current" : "upcoming"
+          }
+        />
+        <CaseStep
+          number="3"
+          label="Review facts"
+          detail={
+            pendingCount > 0
+              ? `${pendingCount} waiting`
+              : reviewComplete
+                ? "Review complete"
+                : "Not started"
+          }
+          state={
+            reviewComplete
+              ? "complete"
+              : pendingCount > 0
+                ? "current"
+                : "upcoming"
+          }
+        />
+        <CaseStep
+          number="4"
+          label="Ask or export"
+          detail={approvedCount > 0 ? `${approvedCount} approved facts` : "Requires approval"}
+          state={approvedCount > 0 ? "current" : "upcoming"}
+        />
+      </ol>
+
+      <div className="overview-grid">
+        <section className="next-action-panel">
+          <div>
+            <span className="small-label">{nextAction.eyebrow}</span>
+            <h2>{nextAction.title}</h2>
+            <p>{nextAction.description}</p>
+          </div>
+          <div className="next-action-buttons">
+            <button
+              className="primary-button"
+              onClick={nextAction.action}
+              disabled={importing}
+            >
+              {importing ? "Processing locally…" : nextAction.actionLabel}
+              {!importing ? <ArrowRight size={16} /> : null}
+            </button>
+            <button
+              className="text-button"
+              onClick={nextAction.secondaryAction}
+              disabled={importing}
+            >
+              {nextAction.secondaryLabel}
+            </button>
+          </div>
+          {importing && importProgress ? (
+            <div className="inline-progress" role="status" aria-live="polite">
+              <span>{importProgress.message}</span>
+              <progress max={1} value={importProgress.progress} />
+            </div>
+          ) : null}
+        </section>
+
+        <aside className="handling-note">
+          <FolderLock size={20} />
+          <div>
+            <span className="small-label">How files are handled</span>
+            <strong>Your source documents stay on this device.</strong>
+            <p>
+              The app reads files and runs OCR in your browser. It stores a local
+              evidence copy with cryptographic hashes for citation checks.
+            </p>
+            <button onClick={() => onNavigate("settings")}>View privacy settings</button>
+          </div>
+        </aside>
+      </div>
+
+      <section className="matter-summary" aria-label="Matter summary">
+        <div className="summary-heading">
+          <div>
+            <span className="small-label">Matter record</span>
+            <h2>What is available now</h2>
+          </div>
+          <button className="text-button" onClick={() => onNavigate("documents")}>
+            Open document list <ArrowRight size={14} />
+          </button>
+        </div>
+        <div className="metrics">
+          <Metric
+            icon={FileText}
+            label="Documents"
+            value={String(workspace.documents.length)}
+            detail="Stored in this browser"
+          />
+          <Metric
+            icon={FileCheck2}
+            label="Awaiting review"
+            value={String(pendingCount)}
+            detail="Not yet queryable"
+            tone={pendingCount > 0 ? "copper" : "blue"}
+          />
+          <Metric
+            icon={ShieldCheck}
+            label="Approved facts"
+            value={String(approvedCount)}
+            detail="Available for answers"
+            tone="green"
+          />
+          <Metric
+            icon={Database}
+            label="Citation rule"
+            value="Exact"
+            detail="UTF-8 byte matched"
+            tone="green"
+          />
+        </div>
+      </section>
+    </section>
+  );
+}
+
+function CaseStep({
+  number,
+  label,
+  detail,
+  state
+}: {
+  number: string;
+  label: string;
+  detail: string;
+  state: "complete" | "current" | "upcoming";
+}) {
+  return (
+    <li className={`case-step ${state}`}>
+      <span className="step-marker">
+        {state === "complete" ? <Check size={15} /> : number}
+      </span>
+      <span>
+        <strong>{label}</strong>
+        <small>{detail}</small>
+      </span>
+    </li>
+  );
+}
+
+function QueryView({
+  workspace,
+  approvedCount,
+  question,
+  answer,
+  selectedCitationId,
+  onQuestionChange,
+  onRunQuery,
+  onSelectCitation,
+  onNavigate
+}: {
+  workspace: WorkspaceState;
+  approvedCount: number;
+  question: string;
+  answer: QueryAnswer | null;
+  selectedCitationId: string | null;
+  onQuestionChange: (value: string) => void;
+  onRunQuery: () => Promise<void>;
+  onSelectCitation: (id: string) => void;
+  onNavigate: (view: View) => void;
+}) {
+  const citationsById = new Map(
+    workspace.citations.map((citation) => [citation.id, citation])
+  );
+  const documentsById = new Map(
+    workspace.documents.map((document) => [document.id, document])
+  );
+  const canQuery = approvedCount > 0;
+
+  return (
+    <section className="query-page">
+      <header className="page-heading query-heading">
+        <div>
+          <span className="small-label">Approved record only</span>
+          <h1>Ask the case</h1>
+          <p>
+            Ask in plain language. Answers are limited to approved facts and open
+            directly to exact source text.
+          </p>
+        </div>
+        <span className="record-count">
+          <strong>{approvedCount}</strong> approved {approvedCount === 1 ? "fact" : "facts"}
+        </span>
+      </header>
+
+      {!canQuery ? (
+        <div className="query-locked">
+          <FileCheck2 size={24} />
+          <div>
+            <strong>Approve facts before asking questions</strong>
+            <p>
+              Drafts are intentionally excluded. Add documents and complete review
+              before the case record can answer a question.
+            </p>
+          </div>
+          <button
+            className="primary-button"
+            onClick={() =>
+              onNavigate(workspace.documents.length > 0 ? "review" : "documents")
+            }
+          >
+            {workspace.documents.length > 0 ? "Go to review" : "Add documents"}
+            <ArrowRight size={16} />
+          </button>
+        </div>
+      ) : (
+        <section className="query-panel">
+          <form
+            className="query-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void onRunQuery();
+            }}
+          >
+            <Search size={19} aria-hidden />
+            <input
+              value={question}
+              onChange={(event) => onQuestionChange(event.target.value)}
+              aria-label="Ask a question about the matter"
+              placeholder="For example: What happened before the March 12 meeting?"
+            />
+            <button type="submit" disabled={question.trim().length === 0}>
+              Search record
+            </button>
+          </form>
+          <div className="query-rules">
+            <span><CheckCircle2 size={14} /> Approved facts only</span>
+            <span><CheckCircle2 size={14} /> Exact source quotations</span>
+            <span><CheckCircle2 size={14} /> Unsupported claims withheld</span>
+          </div>
+
+          {answer ? (
+            <>
+              <div className="answer-header">
+                <span className="small-label">Answer from the record</span>
+                <span
+                  className={`answer-status ${
+                    answer.status === "verified" ? "verified" : ""
+                  }`}
+                >
+                  {answer.status === "verified" ? (
+                    <>
+                      <CheckCircle2 size={15} /> Citations verified
+                    </>
+                  ) : (
+                    "Insufficient evidence"
+                  )}
+                </span>
+              </div>
+              {answer.claims.length ? (
+                <div className="claim-list">
+                  {answer.claims.map((claim, index) => {
+                    const citation = citationsById.get(claim.citationIds[0]);
+                    const document = citation
+                      ? documentsById.get(citation.documentId)
+                      : undefined;
+                    return citation && document ? (
+                      <button
+                        key={claim.factId}
+                        className={`claim ${
+                          selectedCitationId === citation.id ? "selected" : ""
+                        }`}
+                        onClick={() => onSelectCitation(citation.id)}
+                      >
+                        <span className="claim-number">{index + 1}</span>
+                        <span className="claim-body">
+                          <span className="claim-statement">{claim.statement}</span>
+                          <span className="quote">“{citation.exactQuote}”</span>
+                          <span className="claim-source">
+                            <span>
+                              {document.name}
+                              {citation.pageNumber ? ` · page ${citation.pageNumber}` : ""}
+                            </span>
+                            <span>
+                              UTF-8 bytes {citation.canonicalByteStart}–
+                              {citation.canonicalByteEnd}
+                            </span>
+                          </span>
+                        </span>
+                        <span className="byte-verified">
+                          <CheckCircle2 size={16} /> Verified
+                        </span>
+                      </button>
+                    ) : null;
+                  })}
+                </div>
+              ) : (
+                <div className="empty-answer">
+                  <ShieldCheck size={24} />
+                  <strong>The approved record does not support an answer.</strong>
+                  <p>Try a narrower question or review additional source material.</p>
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="query-empty">
+              <MessageSquareText size={22} />
+              <strong>Ask about dates, people, events, or supporting evidence.</strong>
+              <p>
+                The app will abstain when the approved record cannot support a
+                response.
+              </p>
+            </div>
+          )}
+        </section>
+      )}
+    </section>
   );
 }
 
@@ -753,8 +1073,7 @@ function DocumentsView({
   importProgress,
   importPerformance,
   fileInputRef,
-  folderInputRef,
-  onImport
+  folderInputRef
 }: {
   workspace: WorkspaceState;
   importing: boolean;
@@ -762,7 +1081,6 @@ function DocumentsView({
   importPerformance: ImportPerformance | null;
   fileInputRef: React.RefObject<HTMLInputElement | null>;
   folderInputRef: React.RefObject<HTMLInputElement | null>;
-  onImport: (files: FileList | null) => Promise<void>;
 }) {
   return (
     <section className="page-section">
@@ -793,22 +1111,6 @@ function DocumentsView({
             {importing ? "Processing locally…" : "Add files"}
           </button>
         </div>
-        <input
-          ref={fileInputRef}
-          type="file"
-          multiple
-          className="visually-hidden"
-          onChange={(event) => void onImport(event.target.files)}
-        />
-        <input
-          ref={folderInputRef}
-          type="file"
-          multiple
-          className="visually-hidden"
-          onChange={(event) => void onImport(event.target.files)}
-          // React does not type the non-standard directory picker attribute.
-          {...({ webkitdirectory: "" } as Record<string, string>)}
-        />
       </div>
       <div className="privacy-banner">
         <FolderLock size={22} />
