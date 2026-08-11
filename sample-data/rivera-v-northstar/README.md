@@ -2,7 +2,7 @@
 
 Every person, organization, identifier, medical detail, and event in this folder is fictional. The folder intentionally mixes TXT, EML, DOCX, native PDF, and scanned PNG evidence. It also contains a disputed traffic-signal account and a prompt-injection fixture.
 
-Upload the seven numbered files as one folder. Do not upload `ground_truth.json` or this README as evidence. Compare extracted facts and natural-language answers with `ground_truth.json`.
+Add the seven numbered files as one folder. Do not add `ground_truth.json` or this README as evidence. Compare extracted facts and natural-language answers with `ground_truth.json`.
 
 Recommended acceptance checks:
 

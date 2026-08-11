@@ -77,9 +77,20 @@ export function readRasterDimensions(
     bytes[0] === 0x89 &&
     bytes[1] === 0x50 &&
     bytes[2] === 0x4e &&
-    bytes[3] === 0x47
+    bytes[3] === 0x47 &&
+    bytes[4] === 0x0d &&
+    bytes[5] === 0x0a &&
+    bytes[6] === 0x1a &&
+    bytes[7] === 0x0a &&
+    view.getUint32(8) === 13 &&
+    bytes[12] === 0x49 &&
+    bytes[13] === 0x48 &&
+    bytes[14] === 0x44 &&
+    bytes[15] === 0x52
   ) {
-    return { width: view.getUint32(16), height: view.getUint32(20) };
+    const width = view.getUint32(16);
+    const height = view.getUint32(20);
+    return width > 0 && height > 0 ? { width, height } : null;
   }
   if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8) {
     let offset = 2;

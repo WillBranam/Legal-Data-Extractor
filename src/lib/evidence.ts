@@ -73,9 +73,27 @@ export function readCitationContext(
   surroundingCodePoints = 220
 ): CitationContext {
   const bytes = encoder.encode(canonicalText);
-  const exactQuote = readCanonicalByteRange(canonicalText, byteStart, byteEnd);
-  const before = decoder.decode(bytes.slice(0, byteStart));
-  const after = decoder.decode(bytes.slice(byteEnd));
+  if (
+    !Number.isInteger(byteStart) ||
+    !Number.isInteger(byteEnd) ||
+    byteStart < 0 ||
+    byteEnd <= byteStart ||
+    byteEnd > bytes.byteLength
+  ) {
+    throw new RangeError("Citation byte range is outside the canonical artifact.");
+  }
+  const windowBytes = Math.max(0, surroundingCodePoints) * 4;
+  let beforeStart = Math.max(0, byteStart - windowBytes);
+  while (beforeStart < byteStart && (bytes[beforeStart] & 0xc0) === 0x80) {
+    beforeStart += 1;
+  }
+  let afterEnd = Math.min(bytes.byteLength, byteEnd + windowBytes);
+  while (afterEnd > byteEnd && afterEnd < bytes.byteLength && (bytes[afterEnd] & 0xc0) === 0x80) {
+    afterEnd -= 1;
+  }
+  const exactQuote = decoder.decode(bytes.slice(byteStart, byteEnd));
+  const before = decoder.decode(bytes.slice(beforeStart, byteStart));
+  const after = decoder.decode(bytes.slice(byteEnd, afterEnd));
   return {
     before: Array.from(before).slice(-surroundingCodePoints).join(""),
     exactQuote,

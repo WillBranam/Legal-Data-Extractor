@@ -180,6 +180,18 @@ function auditCheckpointService(): string {
 interface AuditCheckpoint {
   sequence: number;
   hash: string;
+  restorePoints?: Array<{ sequence: number; hash: string }>;
+}
+
+export function auditRestorePointApproved(
+  restorePoints: Array<{ sequence: number; hash: string }> | undefined,
+  sequence: number,
+  hash: string | null
+): boolean {
+  return restorePoints?.some(
+    (restorePoint) =>
+      restorePoint.sequence === sequence && restorePoint.hash === hash
+  ) ?? false;
 }
 
 async function readAuditCheckpoint(): Promise<AuditCheckpoint | null> {
@@ -199,8 +211,15 @@ async function readAuditCheckpoint(): Promise<AuditCheckpoint | null> {
       { encoding: "utf8", maxBuffer: 4096 }
     );
     encoded = result.stdout.trim();
-  } catch {
-    return null;
+  } catch (error) {
+    const commandError = error as { code?: string | number; stderr?: string };
+    if (
+      commandError.code === 44 ||
+      /could not be found in the keychain/i.test(commandError.stderr ?? "")
+    ) {
+      return null;
+    }
+    throw error;
   }
   const checkpoint = JSON.parse(encoded) as AuditCheckpoint;
   if (
@@ -209,6 +228,15 @@ async function readAuditCheckpoint(): Promise<AuditCheckpoint | null> {
     !/^[a-f0-9]{64}$/.test(checkpoint.hash)
   ) {
     throw new Error("AUDIT_CHECKPOINT_INVALID");
+  }
+  for (const restorePoint of checkpoint.restorePoints ?? []) {
+    if (
+      !Number.isSafeInteger(restorePoint.sequence) ||
+      restorePoint.sequence < 1 ||
+      !/^[a-f0-9]{64}$/.test(restorePoint.hash)
+    ) {
+      throw new Error("AUDIT_CHECKPOINT_INVALID");
+    }
   }
   return checkpoint;
 }
@@ -228,6 +256,21 @@ async function writeAuditCheckpoint(checkpoint: AuditCheckpoint): Promise<void> 
     ],
     { encoding: "utf8", maxBuffer: 4096 }
   );
+}
+
+async function approveCurrentAuditRestorePoint(): Promise<void> {
+  const checkpoint = await readAuditCheckpoint();
+  if (!checkpoint) throw new Error("AUDIT_CHECKPOINT_MISSING");
+  const restorePoints = [
+    ...(checkpoint.restorePoints ?? []),
+    { sequence: checkpoint.sequence, hash: checkpoint.hash }
+  ].filter(
+    (candidate, index, candidates) =>
+      candidates.findIndex(
+        (item) => item.sequence === candidate.sequence && item.hash === candidate.hash
+      ) === index
+  ).slice(-32);
+  await writeAuditCheckpoint({ ...checkpoint, restorePoints });
 }
 
 async function readKeychainKey(createWhenMissing: boolean): Promise<Buffer> {
@@ -603,13 +646,18 @@ export async function writeLocalWorkspace(
           throw new Error("LEGAL_HOLD_PRESERVATION_REQUIRED");
         }
       }
-      const nextFactIds = new Set(workspace.facts.map((fact) => fact.id));
-      const nextDecisionIds = new Set(
-        workspace.reviewDecisions.map((decision) => decision.id)
+      const nextFacts = new Map(workspace.facts.map((fact) => [fact.id, fact]));
+      const nextDecisions = new Map(
+        workspace.reviewDecisions.map((decision) => [decision.id, decision])
       );
       if (
-        existing.facts.some((fact) => !nextFactIds.has(fact.id)) ||
-        existing.reviewDecisions.some((decision) => !nextDecisionIds.has(decision.id))
+        existing.facts.some(
+          (fact) => JSON.stringify(nextFacts.get(fact.id)) !== JSON.stringify(fact)
+        ) ||
+        existing.reviewDecisions.some(
+          (decision) =>
+            JSON.stringify(nextDecisions.get(decision.id)) !== JSON.stringify(decision)
+        )
       ) {
         throw new Error("LEGAL_HOLD_PRESERVATION_REQUIRED");
       }
@@ -721,6 +769,40 @@ export async function storeOriginalDocument(
   );
 }
 
+export async function deleteStagedOriginalDocument(
+  session: Session,
+  documentId: string
+): Promise<void> {
+  if (!/^[a-f0-9-]{16,64}$/i.test(documentId)) {
+    throw new Error("INVALID_DOCUMENT_ID");
+  }
+  await serializeWorkspaceOperation(async () => {
+    const workspace = await readLocalWorkspace(session);
+    if (workspace?.documents.some((document) => document.id === documentId)) {
+      throw new Error("ORIGINAL_DOCUMENT_IN_USE");
+    }
+    try {
+      await unlink(
+        path.join(
+          await ensureDataDirectory(),
+          ORIGINALS_DIRECTORY,
+          `${documentId}.enc.json`
+        )
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    await appendAuditEvent(
+      session.key,
+      session.username,
+      "document.delete-staged-original",
+      "success",
+      "document",
+      documentId
+    );
+  });
+}
+
 export async function readOriginalDocument(
   session: Session,
   documentId: string
@@ -773,8 +855,9 @@ export async function appendAuditEvent(
     const auditPath = await encryptedFilePath(AUDIT_FILE);
     let previousHash: string | null = null;
     let sequence = 1;
+    let lines: string[] = [];
     try {
-      const lines = (await readFile(auditPath, "utf8")).trim().split("\n").filter(Boolean);
+      lines = (await readFile(auditPath, "utf8")).trim().split("\n").filter(Boolean);
       if (lines.length > 0) {
         const previous = JSON.parse(lines.at(-1)!) as AuditRecordBody & { hash: string };
         previousHash = previous.hash;
@@ -782,6 +865,27 @@ export async function appendAuditEvent(
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    const checkpoint = await readAuditCheckpoint();
+    const currentSequence = sequence - 1;
+    const checkpointMatchesCurrentHead = Boolean(
+      checkpoint &&
+      checkpoint.sequence === currentSequence &&
+      checkpoint.hash === previousHash
+    );
+    const approvedRestorePoint = auditRestorePointApproved(
+      checkpoint?.restorePoints,
+      currentSequence,
+      previousHash
+    );
+    if (
+      !(
+        (checkpoint === null && currentSequence === 0) ||
+        checkpointMatchesCurrentHead ||
+        approvedRestorePoint
+      )
+    ) {
+      throw new Error("AUDIT_ROLLBACK_DETECTED");
     }
     const body: AuditRecordBody = {
       version: 1,
@@ -808,7 +912,11 @@ export async function appendAuditEvent(
       mode: 0o600
     });
     await chmod(auditPath, 0o600);
-    await writeAuditCheckpoint({ sequence, hash });
+    await writeAuditCheckpoint({
+      sequence,
+      hash,
+      restorePoints: checkpoint?.restorePoints
+    });
   });
   auditQueue = run.catch(() => undefined);
   return run;
@@ -861,11 +969,26 @@ export async function verifyAuditChain(
       checkpointMatched = checkpoint.hash === record.hash;
     }
   }
-  if (!checkpointMatched || (checkpoint && checkpoint.sequence > lines.length)) {
+  const approvedRestorePoint = auditRestorePointApproved(
+    checkpoint?.restorePoints,
+    lines.length,
+    previousHash
+  );
+  if (
+    (!checkpointMatched || (checkpoint && checkpoint.sequence > lines.length)) &&
+    !approvedRestorePoint
+  ) {
     return { valid: false, records: lines.length };
   }
-  if (lines.length > 0 && (!checkpoint || checkpoint.sequence < lines.length)) {
-    await writeAuditCheckpoint({ sequence: lines.length, hash: previousHash! });
+  if (
+    lines.length > 0 &&
+    (approvedRestorePoint || !checkpoint || checkpoint.sequence < lines.length)
+  ) {
+    await writeAuditCheckpoint({
+      sequence: lines.length,
+      hash: previousHash!,
+      restorePoints: checkpoint?.restorePoints
+    });
   }
   return { valid: true, records: lines.length };
 }
@@ -890,6 +1013,15 @@ export async function localVaultFileStats(): Promise<{
 async function buildEncryptedLocalBackupStream(
   session: Session
 ): Promise<Readable> {
+  await appendAuditEvent(
+    session.key,
+    session.username,
+    "backup.create-attempt",
+    "success",
+    "vault",
+    null
+  );
+  await approveCurrentAuditRestorePoint();
   const { default: JSZip } = await import("jszip");
   const zip = new JSZip();
   const directory = await ensureDataDirectory();
@@ -941,22 +1073,7 @@ async function buildEncryptedLocalBackupStream(
     compressionOptions: { level: 6 }
   });
   const output = new PassThrough();
-  let outcomeRecorded = false;
-  const recordOutcome = async (outcome: "success" | "failure") => {
-    if (outcomeRecorded) return;
-    outcomeRecorded = true;
-    await appendAuditEvent(
-      session.key,
-      session.username,
-      "backup.create",
-      outcome,
-      "vault",
-      null
-    );
-  };
-  pipeline(source, output, (error) => {
-    void recordOutcome(error ? "failure" : "success").catch(() => undefined);
-  });
+  pipeline(source, output, () => undefined);
   return output;
 }
 
@@ -969,7 +1086,7 @@ export async function createEncryptedLocalBackupStream(
     await appendAuditEvent(
       session.key,
       session.username,
-      "backup.create",
+      "backup.create-attempt",
       "failure",
       "vault",
       null

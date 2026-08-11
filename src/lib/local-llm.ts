@@ -435,6 +435,10 @@ async function reviewProposalsWithLocalModel(
     },
     required: ["approved_ids"]
   };
+  const evidenceReviewDeadline = Date.now() + Math.max(
+    1,
+    Math.floor((deadline - Date.now()) / 2)
+  );
   const evidenceReview = await structuredChat({
     system: [
       "You are the evidence-support reviewer in a legal extraction workflow.",
@@ -448,7 +452,7 @@ async function reviewProposalsWithLocalModel(
     user: JSON.stringify({ candidates }),
     format,
     parse: (value) => reviewResponseSchema.parse(value),
-    deadline
+    deadline: evidenceReviewDeadline
   });
   const adversarialReview = await structuredChat({
     system: [

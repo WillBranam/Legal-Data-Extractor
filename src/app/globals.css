@@ -1066,6 +1066,13 @@ p {
   box-shadow: 0 4px 16px rgb(19 34 53 / 7%);
 }
 
+.claim-evidence:focus-visible {
+  background: white;
+  border-color: #1d4f73;
+  outline: 3px solid #1d4f73;
+  outline-offset: 2px;
+}
+
 .evidence-heading,
 .claim-source {
   display: flex;
@@ -2079,7 +2086,7 @@ table {
 
 @media (prefers-reduced-motion: reduce) {
   .spinner {
-    animation-duration: 1.8s;
+    animation: none;
   }
 }
 

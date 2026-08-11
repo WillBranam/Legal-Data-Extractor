@@ -104,7 +104,10 @@ Losing the Keychain item makes the encrypted evidence unrecoverable.
 ## Backup restoration exercise
 
 The encrypted backup contains ciphertext from `.verity-local-data`; the
-Keychain-held decryption key is intentionally not included.
+Keychain-held decryption key is intentionally not included. Backup creation
+registers the archive's audit head as an approved restore point in Keychain.
+The appliance retains the latest 32 approved restore points and rejects an
+unregistered filesystem rollback.
 
 1. Stop the application.
 2. Preserve the current `.verity-local-data` directory.

@@ -64,6 +64,7 @@ import { createEmptyWorkspace } from "@/lib/workspace";
 import {
   extractDocumentWithLocalModel,
   downloadEncryptedBackup,
+  deleteStagedOriginalFile,
   downloadOriginalFile,
   getLocalRuntimeStatus,
   loginLocalRuntime,
@@ -82,6 +83,8 @@ import type {
 } from "@/lib/types";
 
 type View = "overview" | "documents" | "review" | "query" | "exports" | "settings";
+
+const CONSENSUS_REVIEWER = "3-pass local model consensus";
 
 const navItems: Array<{
   id: View;
@@ -268,6 +271,7 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
     workspace?.facts.filter((fact) => fact.status === "approved").length ?? 0;
   const pendingFacts =
     workspace?.facts.filter((fact) => fact.status === "pending") ?? [];
+  const reviewRegisterCount = workspace?.facts.length ?? 0;
 
   async function runQuery() {
     if (!workspace || question.trim().length === 0 || importing || querying) return;
@@ -399,8 +403,10 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
     const importedDocuments: WorkspaceState["documents"] = [];
     const errors: string[] = [];
     const extractionErrors: string[] = [];
+    const stagedOriginalIds: string[] = [];
     let consensusApproved = 0;
     let withheldByReview = 0;
+    let withheldByVerification = 0;
     try {
       for (const [fileIndex, file] of selectedFiles.entries()) {
         try {
@@ -420,6 +426,7 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
             }
           });
           if (localMode) {
+            stagedOriginalIds.push(document.id);
             await storeOriginalFile(document.id, file);
           }
           importedDocuments.push(document);
@@ -440,7 +447,6 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
                   progress: null
                 });
                 const extraction = await extractDocumentWithLocalModel(document);
-                consensusApproved += extraction.reviewSummary.consensusApproved;
                 withheldByReview += extraction.reviewSummary.withheld;
                 setProcessingStatus({
                   phase: "verifying",
@@ -464,7 +470,11 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
                     structuralPath: `local-llm/page-${proposal.pageNumber}`,
                     parserVersion: document.parserVersion
                   };
-                  if (!(await verifyCitation(citation, document)).verified) continue;
+                  if (!(await verifyCitation(citation, document)).verified) {
+                    withheldByVerification += 1;
+                    continue;
+                  }
+                  consensusApproved += 1;
                   const factId = crypto.randomUUID();
                   const reviewedAt = new Date().toISOString();
                   citations.push(citation);
@@ -479,13 +489,13 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
                     confidence: proposal.confidence,
                     status: "approved",
                     citationIds: [citation.id],
-                    reviewer: "3-pass local model consensus",
+                    reviewer: CONSENSUS_REVIEWER,
                     reviewedAt
                   });
                   reviewDecisions.push({
                     id: crypto.randomUUID(),
                     factId,
-                    reviewer: "3-pass local model consensus",
+                    reviewer: CONSENSUS_REVIEWER,
                     decision: "approved",
                     priorStatus: "pending",
                     occurredAt: reviewedAt
@@ -593,12 +603,17 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
             ? `${extractionErrors.length} could not be extracted by the local model; the encrypted source remains available for retry.`
             : "",
           localMode
-            ? `${consensusApproved} facts passed both model reviews and exact byte verification; ${withheldByReview} were withheld because the agents did not agree.`
+            ? `${consensusApproved} facts passed both model reviews and exact byte verification; ${withheldByReview} were withheld because the agents did not agree; ${withheldByVerification} failed deterministic citation verification.`
             : "",
           "No source file was transmitted outside this workstation."
         ].filter(Boolean).join(" ")
       );
     } catch (error) {
+      if (localMode) {
+        await Promise.allSettled(
+          stagedOriginalIds.map((documentId) => deleteStagedOriginalFile(documentId))
+        );
+      }
       setNotice(
         error instanceof Error
           ? error.message
@@ -694,8 +709,8 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
             >
               <Icon size={19} strokeWidth={1.7} />
               <span>{label}</span>
-              {id === "review" && pendingFacts.length > 0 ? (
-                <span className="nav-count">{pendingFacts.length}</span>
+              {id === "review" && reviewRegisterCount > 0 ? (
+                <span className="nav-count">{reviewRegisterCount}</span>
               ) : null}
             </button>
           ))}
@@ -844,7 +859,7 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
                   </div>
                 </div>
                 <ReviewTable
-                  facts={workspace.facts.filter((fact) => fact.status !== "rejected")}
+                  facts={workspace.facts}
                   citations={workspace.citations}
                   documents={workspace.documents}
                   onReview={reviewFact}
@@ -1007,12 +1022,14 @@ function ProcessingRail({ status }: { status: ProcessingStatus }) {
     saving: "Encrypted record commit"
   };
   return (
-    <section className="processing-rail" role="status" aria-live="polite">
+    <section className="processing-rail">
       <LoaderCircle className="spinner" size={20} aria-hidden />
       <div className="processing-rail-copy">
-        <span className="small-label">{phaseLabels[status.phase]}</span>
-        <strong>{status.message}</strong>
-        <span>
+        <span className="small-label" role="status" aria-live="polite">
+          {phaseLabels[status.phase]}
+        </span>
+        <strong aria-live="off">{status.message}</strong>
+        <span aria-live="off">
           File {status.fileNumber} of {status.totalFiles}: {status.fileName}
         </span>
       </div>
@@ -1269,7 +1286,7 @@ function OverviewView({
           />
           <Metric
             icon={FileCheck2}
-          label="Awaiting verification"
+            label="Awaiting verification"
             value={String(pendingCount)}
             detail={importing ? "Verification in progress" : "Withheld from queries"}
             tone={pendingCount > 0 ? "copper" : "blue"}
@@ -1352,14 +1369,19 @@ function QueryView({
     workspace.documents.map((document) => [document.id, document])
   );
   const factsById = new Map(workspace.facts.map((fact) => [fact.id, fact]));
+  const renderableClaims = (answer?.claims ?? []).flatMap((claim) => {
+    const evidence = claim.citationIds.flatMap((citationId) => {
+      const citation = citationsById.get(citationId);
+      const document = citation ? documentsById.get(citation.documentId) : undefined;
+      return citation && document ? [{ citation, document }] : [];
+    });
+    return evidence.length > 0 ? [{ claim, evidence }] : [];
+  });
   const canQuery = approvedCount > 0 && !processing;
   const resultDocumentCount = answer
     ? new Set(
-        answer.claims.flatMap((claim) =>
-          claim.citationIds.flatMap((citationId) => {
-            const citation = citationsById.get(citationId);
-            return citation ? [citation.documentId] : [];
-          })
+        renderableClaims.flatMap(({ evidence }) =>
+          evidence.map(({ document }) => document.id)
         )
       ).size
     : 0;
@@ -1462,10 +1484,10 @@ function QueryView({
               <div className="answer-header">
                 <div>
                   <span className="small-label">Answer from the record</span>
-                  {answer.claims.length > 0 ? (
+                  {renderableClaims.length > 0 ? (
                     <strong>
-                      {answer.claims.length} verified{" "}
-                      {answer.claims.length === 1 ? "finding" : "findings"} from{" "}
+                      {renderableClaims.length} verified{" "}
+                      {renderableClaims.length === 1 ? "finding" : "findings"} from{" "}
                       {resultDocumentCount}{" "}
                       {resultDocumentCount === 1 ? "document" : "documents"}
                     </strong>
@@ -1485,18 +1507,11 @@ function QueryView({
                   )}
                 </span>
               </div>
-              {answer.claims.length ? (
+              {renderableClaims.length ? (
                 <div className="claim-list">
-                  {answer.claims.map((claim, index) => {
+                  {renderableClaims.map(({ claim, evidence }, index) => {
                     const fact = factsById.get(claim.factId);
-                    const evidence = claim.citationIds.flatMap((citationId) => {
-                      const citation = citationsById.get(citationId);
-                      const document = citation
-                        ? documentsById.get(citation.documentId)
-                        : undefined;
-                      return citation && document ? [{ citation, document }] : [];
-                    });
-                    return evidence.length > 0 ? (
+                    return (
                       <article key={claim.factId} className="claim">
                         <span className="claim-number">{index + 1}</span>
                         <span className="claim-body">
@@ -1511,7 +1526,7 @@ function QueryView({
                               </span>
                             ) : null}
                             <span>
-                              {fact?.reviewer === "3-pass local model consensus"
+                              {fact?.reviewer === CONSENSUS_REVIEWER
                                 ? "Three-pass consensus"
                                 : "Human verification"}
                             </span>
@@ -1573,7 +1588,7 @@ function QueryView({
                           })}
                         </div>
                       </article>
-                    ) : null;
+                    );
                   })}
                 </div>
               ) : (
@@ -1695,10 +1710,12 @@ function ReviewTable({
                       <div className="verification-method">
                         <strong>
                           {fact.status === "approved"
-                            ? fact.reviewer === "3-pass local model consensus"
+                            ? fact.reviewer === CONSENSUS_REVIEWER
                               ? "Consensus + byte match"
                               : "Reviewer + byte match"
-                            : "Awaiting decision"}
+                            : fact.status === "rejected"
+                              ? "Withheld"
+                              : "Awaiting decision"}
                         </strong>
                         <span>{fact.reviewer ?? "Not reviewed"}</span>
                       </div>
@@ -1710,13 +1727,19 @@ function ReviewTable({
                             Approve
                           </button>
                         ) : null}
-                        <button
-                          className={fact.status === "approved" ? "withdraw" : "reject"}
-                          onClick={() => void onReview(fact.id, "rejected")}
-                          aria-label={`Withhold ${fact.statement} from queries`}
-                        >
-                          {fact.status === "approved" ? "Withhold" : <X size={15} />}
-                        </button>
+                        {fact.status === "rejected" ? (
+                          <button onClick={() => void onReview(fact.id, "approved")}>
+                            Restore
+                          </button>
+                        ) : (
+                          <button
+                            className={fact.status === "approved" ? "withdraw" : "reject"}
+                            onClick={() => void onReview(fact.id, "rejected")}
+                            aria-label={`Withhold ${fact.statement} from queries`}
+                          >
+                            {fact.status === "approved" ? "Withhold" : <X size={15} />}
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -1901,7 +1924,7 @@ function ExportsView({
     try {
       if (auditExports) {
         await recordLocalAuditEvent({
-          action: `export.${format}`,
+          action: `export.${format}.attempt`,
           resourceType: "export",
           resourceId: workspace.matter.id
         });
@@ -2069,7 +2092,7 @@ function SettingsView({
         <button className="secondary-button reset-button" onClick={() => void onReset()}>
           <RotateCcw size={16} /> Clear local matter data
         </button>
-        {onSignOut ? (
+        {localStatus ? (
           <button
             className="secondary-button"
             onClick={() => void downloadEncryptedBackup()}

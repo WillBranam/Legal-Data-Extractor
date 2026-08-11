@@ -75,10 +75,24 @@ describe("local parser evidence artifacts", () => {
 
   it("reads image dimensions from bounded PNG headers before decoding", () => {
     const header = new Uint8Array(24);
-    header.set([0x89, 0x50, 0x4e, 0x47], 0);
+    header.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
     const view = new DataView(header.buffer);
+    view.setUint32(8, 13);
+    header.set([0x49, 0x48, 0x44, 0x52], 12);
     view.setUint32(16, 1800);
     view.setUint32(20, 2300);
     expect(readRasterDimensions(header)).toEqual({ width: 1800, height: 2300 });
+  });
+
+  it("rejects malformed or zero-sized PNG headers", () => {
+    const malformed = new Uint8Array(24);
+    malformed.set([0x89, 0x50, 0x4e, 0x47], 0);
+    const zeroSized = new Uint8Array(24);
+    zeroSized.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+    const view = new DataView(zeroSized.buffer);
+    view.setUint32(8, 13);
+    zeroSized.set([0x49, 0x48, 0x44, 0x52], 12);
+    expect(readRasterDimensions(malformed)).toBeNull();
+    expect(readRasterDimensions(zeroSized)).toBeNull();
   });
 });

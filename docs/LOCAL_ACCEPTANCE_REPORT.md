@@ -30,6 +30,9 @@ The 8B model was about 26% slower on this hardware, but materially more useful.
 It is therefore the release default. The 4B model remains configurable for
 lower-memory machines, with an explicit recall tradeoff.
 
+Only the difficult three-document subset was timed with `qwen3:8b`; a complete
+seven-file 8B run was not measured for this report.
+
 ## Accuracy and guardrails
 
 - Every accepted claim displayed the server-verified exact quotation, document,

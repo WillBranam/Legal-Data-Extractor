@@ -92,7 +92,7 @@ def create_medical_docx() -> None:
         ("Date of birth", "September 9, 1987"),
         ("Date of service", "March 12, 2025"),
     ]
-    for row, (label, value) in zip(table.rows, values):
+    for row, (label, value) in zip(table.rows, values, strict=True):
         row.cells[0].width = Inches(1.875)
         row.cells[1].width = Inches(4.625)
         row.cells[0].text = label
@@ -268,14 +268,28 @@ def create_damages_pdf() -> None:
 def create_scanned_note() -> None:
     image = Image.new("RGB", (1800, 2300), "white")
     draw = ImageDraw.Draw(image)
-    font_path = "/System/Library/Fonts/Supplemental/Arial.ttf"
-    bold_path = "/System/Library/Fonts/Supplemental/Arial Bold.ttf"
-    try:
-        body = ImageFont.truetype(font_path, 46)
-        bold = ImageFont.truetype(bold_path, 52)
-    except OSError:
-        body = ImageFont.load_default()
-        bold = body
+    font_pairs = [
+        (
+            Path("/System/Library/Fonts/Supplemental/Arial.ttf"),
+            Path("/System/Library/Fonts/Supplemental/Arial Bold.ttf"),
+        ),
+        (
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+        ),
+        (
+            Path("/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf"),
+            Path("/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"),
+        ),
+    ]
+    font_pair = next(
+        ((regular, bold) for regular, bold in font_pairs if regular.is_file() and bold.is_file()),
+        None,
+    )
+    if font_pair is None:
+        raise RuntimeError("Install Arial, DejaVu Sans, or Liberation Sans to generate the OCR fixture.")
+    body = ImageFont.truetype(str(font_pair[0]), 46)
+    bold = ImageFont.truetype(str(font_pair[1]), 52)
     y = 120
     draw.text((130, y), "SYNTHETIC INVESTIGATOR FIELD NOTE", fill="black", font=bold)
     y += 120
@@ -403,7 +417,7 @@ def write_ground_truth() -> None:
 
 Every person, organization, identifier, medical detail, and event in this folder is fictional. The folder intentionally mixes TXT, EML, DOCX, native PDF, and scanned PNG evidence. It also contains a disputed traffic-signal account and a prompt-injection fixture.
 
-Upload the seven numbered files as one folder. Do not upload `ground_truth.json` or this README as evidence. Compare extracted facts and natural-language answers with `ground_truth.json`.
+Add the seven numbered files as one folder. Do not add `ground_truth.json` or this README as evidence. Compare extracted facts and natural-language answers with `ground_truth.json`.
 
 Recommended acceptance checks:
 

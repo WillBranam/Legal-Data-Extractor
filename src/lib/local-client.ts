@@ -95,6 +95,17 @@ export async function storeOriginalFile(documentId: string, file: File): Promise
   }
 }
 
+export async function deleteStagedOriginalFile(documentId: string): Promise<void> {
+  const response = await fetch(
+    `/api/local/documents/${encodeURIComponent(documentId)}`,
+    { method: "DELETE", credentials: "same-origin", cache: "no-store" }
+  );
+  if (!response.ok) {
+    const body = (await response.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `LOCAL_API_HTTP_${response.status}`);
+  }
+}
+
 export async function downloadOriginalFile(
   documentId: string,
   filename: string
@@ -142,10 +153,10 @@ export async function recordLocalAuditEvent(input: {
   action:
     | "review.approve"
     | "review.reject"
-    | "export.csv"
-    | "export.xlsx"
-    | "export.json"
-    | "export.docx"
+    | "export.csv.attempt"
+    | "export.xlsx.attempt"
+    | "export.json.attempt"
+    | "export.docx.attempt"
     | "matter.legal-hold-enable"
     | "matter.legal-hold-release";
   resourceType: "fact" | "matter" | "export";

@@ -4,7 +4,11 @@ import {
   readBoundedBody,
   requireLocalSession
 } from "@/lib/local-request";
-import { readOriginalDocument, storeOriginalDocument } from "@/lib/local-vault";
+import {
+  deleteStagedOriginalDocument,
+  readOriginalDocument,
+  storeOriginalDocument
+} from "@/lib/local-vault";
 
 export const runtime = "nodejs";
 
@@ -47,6 +51,23 @@ export async function PUT(
     bytes.fill(0);
     return NextResponse.json(
       { status: "stored" },
+      { headers: { "Cache-Control": "no-store" } }
+    );
+  } catch (error) {
+    return localApiError(error);
+  }
+}
+
+export async function DELETE(
+  request: Request,
+  context: { params: Promise<{ documentId: string }> }
+) {
+  try {
+    const session = await requireLocalSession(request, true);
+    const { documentId } = await context.params;
+    await deleteStagedOriginalDocument(session, documentId);
+    return NextResponse.json(
+      { status: "deleted" },
       { headers: { "Cache-Control": "no-store" } }
     );
   } catch (error) {

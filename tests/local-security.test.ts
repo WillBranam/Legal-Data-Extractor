@@ -11,6 +11,7 @@ import {
   validatedLocalModelName
 } from "@/lib/local-llm";
 import { createEmptyWorkspace } from "@/lib/workspace";
+import { auditRestorePointApproved } from "@/lib/local-vault";
 
 describe("offline security boundaries", () => {
   it("accepts only HTTP loopback model endpoints", () => {
@@ -42,6 +43,14 @@ describe("offline security boundaries", () => {
     const models = [{ name: "qwen3:4b", model: "qwen3:4b" }];
     expect(isConfiguredLocalModelInstalled(models, "qwen3:4b")).toBe(true);
     expect(isConfiguredLocalModelInstalled(models, "qwen3:8b")).toBe(false);
+  });
+
+  it("accepts only an exact Keychain-approved audit restore head", () => {
+    const approved = [{ sequence: 12, hash: "a".repeat(64) }];
+    expect(auditRestorePointApproved(approved, 12, "a".repeat(64))).toBe(true);
+    expect(auditRestorePointApproved(approved, 11, "a".repeat(64))).toBe(false);
+    expect(auditRestorePointApproved(approved, 12, "b".repeat(64))).toBe(false);
+    expect(auditRestorePointApproved(undefined, 12, "a".repeat(64))).toBe(false);
   });
 
   it("publishes only unanimous, allowlisted review decisions", () => {

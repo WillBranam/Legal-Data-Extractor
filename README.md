@@ -124,7 +124,7 @@ the user identity and must be individual, managed, protected by MFA where firm
 policy requires it, and backed by FileVault and automatic screen lock. Earlier
 password vaults still show their legacy unlock screen.
 
-1. Upload supported case files.
+1. Add supported case files.
 2. Wait until extraction, two separate model-review passes, deterministic byte
    verification, and encrypted save finish. Query and export remain locked.
 3. Inspect the automatic verification register and exact source quotations.
@@ -160,14 +160,22 @@ Open `http://127.0.0.1:3000`.
 
 The folder `sample-data/rivera-v-northstar` contains seven fictional evidence
 files, a known-answer ground-truth file, a disputed fact, and a prompt-injection
-fixture. Upload only the seven numbered files. See the folder README for the
+fixture. Add only the seven numbered files. See the folder README for the
 acceptance questions and expected results.
+
+To regenerate the fixture, use Python 3.10 or newer and install its generator
+dependencies first:
+
+```bash
+python3 -m pip install python-docx Pillow reportlab
+python3 scripts/generate-sample-case.py
+```
 
 ## Run online on Vercel
 
 The online profile is a browser-processing pilot. Documents are parsed and
 OCRed in the user's browser, and browser IndexedDB stores the pilot workspace.
-The server exposes no upload endpoint or hosted-model endpoint.
+The server exposes no remote-upload endpoint or hosted-model endpoint.
 
 The Vercel profile is **not approved for PHI**. Use only synthetic or
 de-identified documents unless a separately reviewed hosted architecture,
