@@ -1,5 +1,12 @@
 import { access, stat } from "node:fs/promises";
 import path from "node:path";
+import { loadEnvFile } from "node:process";
+
+try {
+  loadEnvFile(".env.local");
+} catch (error) {
+  if (error?.code !== "ENOENT") throw error;
+}
 
 const minimumNode = [20, 18, 0];
 const currentNode = process.versions.node.split(".").map(Number);
@@ -34,6 +41,17 @@ function atLeast(current, minimum) {
 if (atLeast(currentNode, minimumNode)) passes.push(`Node ${process.versions.node}`);
 else failures.push(`Node ${minimumNode.join(".")} or newer is required`);
 
+if (process.platform === "darwin") {
+  try {
+    await access("/usr/bin/security");
+    passes.push("macOS Keychain credential store");
+  } catch {
+    failures.push("macOS Keychain command is unavailable");
+  }
+} else {
+  failures.push("Local-first v1 passwordless vault currently requires macOS");
+}
+
 const validEndpoint = Boolean(endpoint) &&
   endpoint.protocol === "http:" &&
   ["127.0.0.1", "localhost", "[::1]"].includes(endpoint.hostname);
@@ -52,9 +70,7 @@ if (validEndpoint) {
     });
     const body = await response.json();
     const installed = (body.models || []).some(
-      (candidate) =>
-        candidate.name === model ||
-        candidate.name?.split(":")[0] === model.split(":")[0]
+      (candidate) => candidate.name === model || candidate.model === model
     );
     if (installed) passes.push(`Ollama model ${model}`);
     else failures.push(`Ollama is reachable but model ${model} is not installed`);
@@ -65,6 +81,7 @@ if (validEndpoint) {
 
 for (const asset of [
   "public/ocr/worker.min.js",
+  "public/ocr/pdf.worker.min.mjs",
   "public/ocr/lang/eng.traineddata.gz"
 ]) {
   try {

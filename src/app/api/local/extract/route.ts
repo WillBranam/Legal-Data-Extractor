@@ -26,17 +26,17 @@ export async function POST(request: Request) {
         "EXTRACTION_REQUEST_TOO_LARGE"
       )
     );
-    const proposals = await extractWithLocalModel(evidenceDocument);
+    const result = await extractWithLocalModel(evidenceDocument);
     await appendAuditEvent(
       session.key,
       session.username,
-      "model.extract",
+      "model.extract-review-consensus",
       "success",
       "document",
       evidenceDocument.id
     );
     return NextResponse.json(
-      { proposals },
+      result,
       { headers: { "Cache-Control": "no-store" } }
     );
   } catch (error) {

@@ -11,18 +11,17 @@ the control; it does not mean a regulated entity has completed HIPAA compliance.
 | External document and prompt egress blocked | Implemented | Local API and model host checks accept loopback only |
 | Local OCR with self-hosted assets | Implemented | `src/lib/ocr.ts`, `public/ocr` build assets |
 | Encrypted originals and canonical evidence | Implemented | AES-256-GCM local vault in `src/lib/local-vault.ts` |
-| Password-based unique local identity | Implemented for single-user appliance | Local vault setup and session routes |
-| Session expiration | Implemented | 30-minute idle and 12-hour absolute limits |
-| Cross-site mutation protection | Implemented | Same-origin validation and strict same-site cookie |
+| Unique local identity | Implemented for single-user macOS appliance | Individual signed-in OS account; random vault key stored in macOS Keychain |
+| Cross-site mutation protection | Implemented | Loopback host enforcement and same-origin validation |
 | Exact citation integrity | Implemented | SHA-256 plus exact UTF-8 byte verification |
-| Human approval before query | Implemented | Pending facts excluded from query |
-| Authenticated review history | Implemented | Append-only `ReviewDecision` records |
-| Tamper-evident audit events | Implemented | HMAC hash chain with verification |
+| Automatic verification before query | Implemented with residual model risk | Two separate local-model review passes plus deterministic byte verification; authoritative claim text is the exact source span |
+| Verification history | Implemented | Append-only `ReviewDecision` records identify local model consensus |
+| Tamper-evident audit events | Implemented | HMAC hash chain plus a separately protected macOS Keychain head checkpoint detects modification and rollback |
 | Legal-hold deletion block | Implemented | Client and vault enforcement |
-| Encrypted backup generation | Implemented | Local authenticated backup route |
-| Parser resource limits | Implemented | File, batch, page, render, and pixel limits |
+| Encrypted backup generation | Implemented | Loopback-only backup route; Keychain key excluded |
+| Parser resource limits | Implemented with residual PDF risk | File, batch, page, render, image-header, DOCX expansion, and extracted-text limits |
 | Spreadsheet formula injection protection | Implemented | CSV formula-prefix neutralization |
-| Unsupported claims withheld | Implemented | Selected facts still undergo deterministic citation verification |
+| Unsupported model prose withheld | Implemented for verified claims | Model paraphrases are not authoritative; displayed claim text is rehydrated from exact canonical bytes |
 | Cloud/model fallback prohibited | Implemented | Loopback endpoint, non-cloud model-name validation, `OLLAMA_NO_CLOUD=1`, and no fallback |
 
 ## Firm-controlled safeguards
@@ -53,19 +52,15 @@ Real PHI must not be used until:
 2. every firm-controlled safeguard has an owner and evidence;
 3. local operation is demonstrated with the external network disconnected;
 4. backup restoration and incident-response exercises pass;
-5. legal, privacy, and security reviewers approve the documented residual risk.
+5. legal, privacy, and security reviewers approve the documented residual risk,
+   including correlated errors from multiple passes of the same local model and
+   the limits of any control after a fully compromised privileged OS account.
 
 ## Latest repository validation
 
 - Local and public production builds: passed.
-- Lint and 12 automated tests: passed.
-- Local readiness with loopback Ollama and `qwen3:8b`: passed.
+- Lint and 21 automated tests: passed.
+- Local readiness with loopback Ollama and the configured local model: passed.
 - Production dependency audit (`npm audit --omit=dev`): zero known
   vulnerabilities.
-- Development-only lint/build dependency audit: nine high-severity
-  `brace-expansion` findings remain because the registry's proposed forced
-  remediation breaks the current ESLint matcher API. The documented
-  `local:prepare-runtime` step prunes those packages from the appliance after
-  building, and `local:verify-runtime` audits the resulting production
-  dependency boundary. The development dependency chain must still be upgraded
-  when a compatible fix is available.
+- Full development and production dependency audit: zero known vulnerabilities.

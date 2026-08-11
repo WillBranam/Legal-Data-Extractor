@@ -9,10 +9,10 @@ const auditSchema = z.object({
   action: z.enum([
     "review.approve",
     "review.reject",
-    "export.csv",
-    "export.xlsx",
-    "export.json",
-    "export.docx",
+    "export.csv.attempt",
+    "export.xlsx.attempt",
+    "export.json.attempt",
+    "export.docx.attempt",
     "matter.legal-hold-enable",
     "matter.legal-hold-release"
   ]),

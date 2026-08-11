@@ -7,6 +7,12 @@ import type {
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
 
+export interface CitationContext {
+  before: string;
+  exactQuote: string;
+  after: string;
+}
+
 function toHex(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
@@ -58,6 +64,41 @@ export function readCanonicalByteRange(
     throw new RangeError("Citation byte range is outside the canonical artifact.");
   }
   return decoder.decode(bytes.slice(byteStart, byteEnd));
+}
+
+export function readCitationContext(
+  canonicalText: string,
+  byteStart: number,
+  byteEnd: number,
+  surroundingCodePoints = 220
+): CitationContext {
+  const bytes = encoder.encode(canonicalText);
+  if (
+    !Number.isInteger(byteStart) ||
+    !Number.isInteger(byteEnd) ||
+    byteStart < 0 ||
+    byteEnd <= byteStart ||
+    byteEnd > bytes.byteLength
+  ) {
+    throw new RangeError("Citation byte range is outside the canonical artifact.");
+  }
+  const windowBytes = Math.max(0, surroundingCodePoints) * 4;
+  let beforeStart = Math.max(0, byteStart - windowBytes);
+  while (beforeStart < byteStart && (bytes[beforeStart] & 0xc0) === 0x80) {
+    beforeStart += 1;
+  }
+  let afterEnd = Math.min(bytes.byteLength, byteEnd + windowBytes);
+  while (afterEnd > byteEnd && afterEnd < bytes.byteLength && (bytes[afterEnd] & 0xc0) === 0x80) {
+    afterEnd -= 1;
+  }
+  const exactQuote = decoder.decode(bytes.slice(byteStart, byteEnd));
+  const before = decoder.decode(bytes.slice(beforeStart, byteStart));
+  const after = decoder.decode(bytes.slice(byteEnd, afterEnd));
+  return {
+    before: Array.from(before).slice(-surroundingCodePoints).join(""),
+    exactQuote,
+    after: Array.from(after).slice(0, surroundingCodePoints).join("")
+  };
 }
 
 export async function verifyCitation(

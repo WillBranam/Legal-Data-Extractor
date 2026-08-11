@@ -23,6 +23,10 @@ await copyFile(
   join(outputRoot, "worker.min.js")
 );
 await copyFile(languageSource, join(outputRoot, "lang", "eng.traineddata.gz"));
+await copyFile(
+  join(projectRoot, "node_modules", "pdfjs-dist", "legacy", "build", "pdf.worker.min.mjs"),
+  join(outputRoot, "pdf.worker.min.mjs")
+);
 
 const coreFiles = (await readdir(coreSource)).filter((name) =>
   /^tesseract-core(?:-relaxedsimd|-simd)?-lstm\.wasm(?:\.js)?$/.test(name)
@@ -34,5 +38,5 @@ await Promise.all(
 );
 
 console.log(
-  `Prepared self-hosted OCR assets: ${coreFiles.length + 2} files in public/ocr`
+  `Prepared self-hosted OCR/PDF assets: ${coreFiles.length + 3} files in public/ocr`
 );

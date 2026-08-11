@@ -2,7 +2,7 @@
 
 ## One-time preparation
 
-Use a firm-managed Mac, Windows, or Linux workstation with full-disk
+Local-first v1 supports a firm-managed Mac with FileVault full-disk
 encryption, screen lock, current patches, endpoint protection, and a controlled
 browser profile.
 
@@ -69,41 +69,54 @@ npm run local
 
 ## First setup
 
-1. Enter the reviewer's unique name.
-2. Create a vault password of at least 14 characters.
-3. Store the password in the firm's approved password manager.
-4. Confirm Settings shows:
+No application login is required. On first start, the app creates a random
+AES-256 vault key in the signed-in user's macOS Keychain. The individual macOS
+account supplies unique user identification for this single-user appliance.
+Do not use a shared OS account.
+
+1. Confirm FileVault, automatic screen lock, and the firm's managed OS identity
+   controls are active.
+2. Start the app only through `npm run local:start`.
+3. Confirm Settings shows:
    - AES-256-GCM local vault;
    - the expected local model;
    - a verified audit chain;
    - local technical PHI profile.
 
-Losing the password makes the encrypted evidence unrecoverable.
+Losing the Keychain item makes the encrypted evidence unrecoverable.
 
 ## Matter workflow
 
 1. Add supported files or a case folder.
 2. Confirm each file reaches a ready evidence state.
-3. Review the local-model proposals against the exact source quotations.
-4. Approve only supported facts.
-5. Query the approved record.
+3. Wait for both separate model-review passes and deterministic byte checks.
+4. Inspect the verification register. Only exact source spans become
+   authoritative query claims; model-authored paraphrases are not published as
+   verified claims.
+5. Query the verified record.
 6. Inspect every answer citation.
 7. Use XLSX, JSON, or DOCX for ordinary exports. CSV is formula-neutralized,
    but the destination spreadsheet and workstation remain controlled systems.
 8. Enable a legal hold when preservation duties apply.
 9. Download an encrypted backup and move it to approved encrypted backup media.
-10. Sign out to destroy the in-memory session key.
+10. Lock or sign out of macOS after use.
 
 ## Backup restoration exercise
 
-The encrypted backup is a portable copy of `.verity-local-data`.
+The encrypted backup contains ciphertext from `.verity-local-data`; the
+Keychain-held decryption key is intentionally not included. Backup creation
+registers the archive's audit head as an approved restore point in Keychain.
+The appliance retains the latest 32 approved restore points and rejects an
+unregistered filesystem rollback.
 
 1. Stop the application.
 2. Preserve the current `.verity-local-data` directory.
 3. Extract the backup into the repository as `.verity-local-data`.
 4. Ensure the directory permission is `0700` and files are `0600` on Unix-like
    systems.
-5. Start the appliance and unlock it with the original vault password.
+5. Restore only under the original managed macOS account with its Keychain item
+   available. Cross-device recovery requires the firm's separately approved
+   Keychain escrow/recovery procedure.
 6. Confirm the audit chain verifies and a sample citation still byte-matches.
 7. Record the exercise in the firm's continuity evidence.
 
@@ -111,7 +124,7 @@ Perform this test with synthetic data before relying on backups containing PHI.
 
 ## Incident response
 
-If the workstation, password, browser profile, export, or backup may be
+If the workstation, OS account, Keychain, browser profile, export, or backup may be
 compromised:
 
 1. stop the appliance and disconnect the workstation according to the firm's

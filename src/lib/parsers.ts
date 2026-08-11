@@ -16,6 +16,10 @@ export const MAX_SOURCE_FILE_BYTES = 100 * 1024 * 1024;
 export const MAX_PDF_PAGES = 500;
 const MAX_DECODED_IMAGE_PIXELS = 50_000_000;
 const MAX_PDF_RENDER_PIXELS = 40_000_000;
+const MAX_DOCX_ENTRIES = 512;
+const MAX_DOCX_EXPANDED_BYTES = 32 * 1024 * 1024;
+const MAX_DOCX_COMPRESSION_RATIO = 100;
+const MAX_EXTRACTED_TEXT_CHARACTERS = 8_000_000;
 
 export interface ParseProgress {
   fileName: string;
@@ -62,6 +66,90 @@ export function normalizedText(value: string): string {
 export function needsOcr(nativeText: string): boolean {
   return normalizedText(nativeText).replace(/\s+/g, "").length <
     MIN_NATIVE_TEXT_CHARACTERS;
+}
+
+export function readRasterDimensions(
+  bytes: Uint8Array
+): { width: number; height: number } | null {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (
+    bytes.length >= 24 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47 &&
+    bytes[4] === 0x0d &&
+    bytes[5] === 0x0a &&
+    bytes[6] === 0x1a &&
+    bytes[7] === 0x0a &&
+    view.getUint32(8) === 13 &&
+    bytes[12] === 0x49 &&
+    bytes[13] === 0x48 &&
+    bytes[14] === 0x44 &&
+    bytes[15] === 0x52
+  ) {
+    const width = view.getUint32(16);
+    const height = view.getUint32(20);
+    return width > 0 && height > 0 ? { width, height } : null;
+  }
+  if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8) {
+    let offset = 2;
+    const startOfFrame = new Set([
+      0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7,
+      0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf
+    ]);
+    while (offset + 8 < bytes.length) {
+      if (bytes[offset] !== 0xff) {
+        offset += 1;
+        continue;
+      }
+      const marker = bytes[offset + 1];
+      if (marker === 0xd8 || marker === 0xd9) {
+        offset += 2;
+        continue;
+      }
+      const length = view.getUint16(offset + 2);
+      if (length < 2 || offset + 2 + length > bytes.length) break;
+      if (startOfFrame.has(marker)) {
+        return {
+          height: view.getUint16(offset + 5),
+          width: view.getUint16(offset + 7)
+        };
+      }
+      offset += 2 + length;
+    }
+    return null;
+  }
+  if (
+    bytes.length >= 16 &&
+    ((bytes[0] === 0x49 && bytes[1] === 0x49) ||
+      (bytes[0] === 0x4d && bytes[1] === 0x4d))
+  ) {
+    const littleEndian = bytes[0] === 0x49;
+    if (view.getUint16(2, littleEndian) !== 42) return null;
+    const ifdOffset = view.getUint32(4, littleEndian);
+    if (ifdOffset + 2 > bytes.length) return null;
+    const entryCount = view.getUint16(ifdOffset, littleEndian);
+    let width: number | null = null;
+    let height: number | null = null;
+    for (let index = 0; index < entryCount; index += 1) {
+      const offset = ifdOffset + 2 + index * 12;
+      if (offset + 12 > bytes.length) break;
+      const tag = view.getUint16(offset, littleEndian);
+      if (tag !== 256 && tag !== 257) continue;
+      const type = view.getUint16(offset + 2, littleEndian);
+      const count = view.getUint32(offset + 4, littleEndian);
+      if (count !== 1 || ![3, 4].includes(type)) continue;
+      const value =
+        type === 3
+          ? view.getUint16(offset + 8, littleEndian)
+          : view.getUint32(offset + 8, littleEndian);
+      if (tag === 256) width = value;
+      if (tag === 257) height = value;
+    }
+    return width && height ? { width, height } : null;
+  }
+  return null;
 }
 
 export function buildCanonicalArtifact(pages: ParsedPage[]): {
@@ -156,6 +244,17 @@ async function recognizeCanvas(input: {
   };
 }
 
+export function pdfTextItemsToText(
+  items: Array<{ str?: string; hasEOL?: boolean }>
+): string {
+  return items
+    .map((item) => `${item.str ?? ""}${item.hasEOL ? "\n" : " "}`)
+    .join("")
+    .replaceAll(/[ \t]+\n/g, "\n")
+    .replaceAll(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
 async function parsePdf(
   buffer: ArrayBuffer,
   file: File,
@@ -163,8 +262,11 @@ async function parsePdf(
   options: ParseLocalFileOptions
 ): Promise<ParsedContent> {
   const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  pdfjs.GlobalWorkerOptions.workerSrc = "/ocr/pdf.worker.min.mjs";
   const document = await pdfjs.getDocument({
-    data: new Uint8Array(buffer),
+    // PDF.js transfers its input to the worker. Send a copy so the original
+    // bytes remain available for the immutable source hash and encrypted vault.
+    data: new Uint8Array(buffer).slice(),
     useWorkerFetch: false,
     isEvalSupported: false
   }).promise;
@@ -186,9 +288,12 @@ async function parsePdf(
       });
       const page = await document.getPage(pageNumber);
       const content = await page.getTextContent();
-      const nativeText = content.items
-        .map((item) => ("str" in item ? item.str : ""))
-        .join(" ");
+      const nativeText = pdfTextItemsToText(
+        content.items.map((item) => ({
+          str: "str" in item ? item.str : "",
+          hasEOL: "hasEOL" in item ? item.hasEOL : false
+        }))
+      );
       const viewport = page.getViewport({ scale: PDF_OCR_SCALE });
 
       if (!needsOcr(nativeText)) {
@@ -256,50 +361,13 @@ async function parseImage(
   session: LocalOcrSession,
   options: ParseLocalFileOptions
 ): Promise<ParsedContent> {
-  let bitmap: ImageBitmap;
-  try {
-    bitmap = await createImageBitmap(file);
-  } catch {
-    report(file, options, {
-      phase: "ocr-loading",
-      pageNumber: 1,
-      totalPages: 1,
-      progress: 0,
-      message: "Preparing on-device OCR"
-    });
-    try {
-      const result = await session.recognize(file, (ocrProgress) => {
-        report(file, options, {
-          phase: "ocr",
-          pageNumber: 1,
-          totalPages: 1,
-          progress: ocrProgress.progress,
-          message: `OCR page 1 of 1: ${ocrProgress.status}`
-        });
-      });
-      return {
-        pages: [
-          {
-            pageNumber: 1,
-            text: result.text,
-            extractionMethod: "ocr",
-            width: null,
-            height: null,
-            imageSha256: await sha256Bytes(await file.arrayBuffer()),
-            ocrConfidence: result.confidence
-          }
-        ],
-        parserVersion: `image-local+tesseract-local:${localOcrVersion()}`,
-        processingState: "ready"
-      };
-    } catch {
-      return {
-        pages: [],
-        parserVersion: `image-local+tesseract-local:${localOcrVersion()}`,
-        processingState: "ocr-failed"
-      };
-    }
+  const header = new Uint8Array(await file.slice(0, 64 * 1024).arrayBuffer());
+  const dimensions = readRasterDimensions(header);
+  if (!dimensions) throw new Error("Image dimensions could not be safely verified.");
+  if (dimensions.width * dimensions.height > MAX_DECODED_IMAGE_PIXELS) {
+    throw new Error("Image exceeds the local decoded-pixel limit.");
   }
+  const bitmap = await createImageBitmap(file);
   if (bitmap.width * bitmap.height > MAX_DECODED_IMAGE_PIXELS) {
     bitmap.close();
     throw new Error("Image exceeds the local decoded-pixel limit.");
@@ -352,8 +420,31 @@ async function parseImage(
 }
 
 async function parseDocx(buffer: ArrayBuffer): Promise<ParsedContent> {
+  const { default: JSZip } = await import("jszip");
+  const archive = await JSZip.loadAsync(buffer, { checkCRC32: false });
+  const entries = Object.values(archive.files) as Array<{
+    dir: boolean;
+    _data?: { compressedSize?: number; uncompressedSize?: number };
+  }>;
+  if (entries.length > MAX_DOCX_ENTRIES) throw new Error("DOCX_ENTRY_LIMIT_EXCEEDED");
+  let expandedBytes = 0;
+  for (const entry of entries) {
+    if (entry.dir) continue;
+    const compressed = entry._data?.compressedSize ?? 0;
+    const uncompressed = entry._data?.uncompressedSize ?? 0;
+    expandedBytes += uncompressed;
+    if (
+      expandedBytes > MAX_DOCX_EXPANDED_BYTES ||
+      (compressed > 0 && uncompressed / compressed > MAX_DOCX_COMPRESSION_RATIO)
+    ) {
+      throw new Error("DOCX_EXPANSION_LIMIT_EXCEEDED");
+    }
+  }
   const mammoth = await import("mammoth/mammoth.browser");
   const result = await mammoth.extractRawText({ arrayBuffer: buffer });
+  if (result.value.length > MAX_EXTRACTED_TEXT_CHARACTERS) {
+    throw new Error("EXTRACTED_TEXT_LIMIT_EXCEEDED");
+  }
   return {
     pages: [
       {

@@ -73,6 +73,12 @@ after the production build is complete. `local:verify-runtime` audits only the
 installed production dependency boundary. Run `npm ci` again before doing
 development work or rebuilding.
 
+`qwen3:8b` is the release default because it was materially more complete on
+the included fact-sheet, transcript, and damages tests. On the test Mac it was
+about 26% slower than `qwen3:4b` on the difficult three-document subset. Machines
+with limited memory may set `LOCAL_LLM_MODEL=qwen3:4b`, but should expect lower
+recall and validate results against their own representative matters.
+
 ### 2. Start the local model
 
 In the first terminal:
@@ -111,18 +117,24 @@ proxy, or a public tunnel.
 
 ### 4. First use
 
-1. Create the local reviewer account and a vault password of at least 14
-   characters.
-2. Store that password in the firm's approved password manager.
-3. Upload supported case files.
-4. Review locally generated fact proposals and approve only supported facts.
-5. Query the approved record and inspect each exact citation.
-6. Create encrypted backups from Settings and move them to an approved
+Local-first v1 supports passwordless operation on a single-user, firm-managed
+Mac. The app creates a random vault key in the signed-in user's macOS Keychain;
+it does not display a second application login. The operating-system account is
+the user identity and must be individual, managed, protected by MFA where firm
+policy requires it, and backed by FileVault and automatic screen lock. Earlier
+password vaults still show their legacy unlock screen.
+
+1. Add supported case files.
+2. Wait until extraction, two separate model-review passes, deterministic byte
+   verification, and encrypted save finish. Query and export remain locked.
+3. Inspect the automatic verification register and exact source quotations.
+4. Query the verified record and inspect each exact citation.
+5. Create encrypted backups from Settings and move them to an approved
    encrypted destination.
-7. Sign out when finished to destroy the in-memory vault session key.
+6. Lock or sign out of macOS when finished.
 
 Local data is stored under `.verity-local-data` in encrypted form. Losing the
-vault password makes that data unrecoverable. Follow the complete
+macOS Keychain item makes that data unrecoverable. Follow the complete
 [local operation runbook](docs/LOCAL_RUNBOOK.md) for backup, restore, legal
 hold, and incident procedures.
 
@@ -144,11 +156,26 @@ npm run local
 
 Open `http://127.0.0.1:3000`.
 
+## Synthetic acceptance matter
+
+The folder `sample-data/rivera-v-northstar` contains seven fictional evidence
+files, a known-answer ground-truth file, a disputed fact, and a prompt-injection
+fixture. Add only the seven numbered files. See the folder README for the
+acceptance questions and expected results.
+
+To regenerate the fixture, use Python 3.10 or newer and install its generator
+dependencies first:
+
+```bash
+python3 -m pip install python-docx Pillow reportlab
+python3 scripts/generate-sample-case.py
+```
+
 ## Run online on Vercel
 
 The online profile is a browser-processing pilot. Documents are parsed and
 OCRed in the user's browser, and browser IndexedDB stores the pilot workspace.
-The server exposes no upload endpoint or hosted-model endpoint.
+The server exposes no remote-upload endpoint or hosted-model endpoint.
 
 The Vercel profile is **not approved for PHI**. Use only synthetic or
 de-identified documents unless a separately reviewed hosted architecture,
@@ -219,3 +246,4 @@ npm run local:check
 - [HIPAA readiness checklist](docs/HIPAA_READINESS_CHECKLIST.md)
 - [Deployment isolation](docs/DEPLOYMENT.md)
 - [Security-hardening review](docs/hardening/hardening.md)
+- [Local acceptance report](docs/LOCAL_ACCEPTANCE_REPORT.md)

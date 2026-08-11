@@ -3,10 +3,24 @@ import { readCanonicalByteRange } from "@/lib/evidence";
 import {
   buildCanonicalArtifact,
   needsOcr,
-  normalizedText
+  normalizedText,
+  pdfTextItemsToText,
+  readRasterDimensions
 } from "@/lib/parsers";
 
 describe("local parser evidence artifacts", () => {
+  it("preserves PDF line endings for transcripts and table rows", () => {
+    expect(
+      pdfTextItemsToText([
+        { str: "6 A. It looked green,", hasEOL: false },
+        { str: "but my view was blocked.", hasEOL: true },
+        { str: "7 Q. Could you see continuously?", hasEOL: true }
+      ])
+    ).toBe(
+      "6 A. It looked green, but my view was blocked.\n7 Q. Could you see continuously?"
+    );
+  });
+
   it("detects pages that need OCR without OCRing normal native text", () => {
     expect(needsOcr("")).toBe(true);
     expect(needsOcr("  page 1  ")).toBe(true);
@@ -57,5 +71,28 @@ describe("local parser evidence artifacts", () => {
         artifact.pageArtifacts[1].canonicalByteEnd
       )
     ).toBe("Second page evidence.");
+  });
+
+  it("reads image dimensions from bounded PNG headers before decoding", () => {
+    const header = new Uint8Array(24);
+    header.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+    const view = new DataView(header.buffer);
+    view.setUint32(8, 13);
+    header.set([0x49, 0x48, 0x44, 0x52], 12);
+    view.setUint32(16, 1800);
+    view.setUint32(20, 2300);
+    expect(readRasterDimensions(header)).toEqual({ width: 1800, height: 2300 });
+  });
+
+  it("rejects malformed or zero-sized PNG headers", () => {
+    const malformed = new Uint8Array(24);
+    malformed.set([0x89, 0x50, 0x4e, 0x47], 0);
+    const zeroSized = new Uint8Array(24);
+    zeroSized.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+    const view = new DataView(zeroSized.buffer);
+    view.setUint32(8, 13);
+    zeroSized.set([0x49, 0x48, 0x44, 0x52], 12);
+    expect(readRasterDimensions(malformed)).toBeNull();
+    expect(readRasterDimensions(zeroSized)).toBeNull();
   });
 });

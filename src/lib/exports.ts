@@ -1,5 +1,5 @@
 import type { Citation, EvidenceDocument, FactRecord } from "@/lib/types";
-import { readCanonicalByteRange } from "@/lib/evidence";
+import { readCanonicalByteRange, readCitationContext } from "@/lib/evidence";
 
 function download(filename: string, blob: Blob): void {
   const url = URL.createObjectURL(blob);
@@ -46,17 +46,37 @@ export function buildApprovedExportRows(
       } catch {
         return [];
       }
+      const context = readCitationContext(
+        source.canonicalText,
+        citation.canonicalByteStart,
+        citation.canonicalByteEnd,
+        240
+      );
+      const page = source.pages.find(
+        (item) => item.pageNumber === citation.pageNumber
+      );
       return [{
+        factId: fact.id,
         statement: fact.statement,
         type: fact.type,
         eventDate: fact.eventDate,
+        confidence: fact.confidence,
         reviewer: fact.reviewer,
+        reviewedAt: fact.reviewedAt,
+        verification: "Exact canonical UTF-8 byte match",
         source: source?.name ?? "",
         page: citation?.pageNumber ?? "",
+        pageCount: source.pageCount,
+        structuralPath: citation.structuralPath ?? "",
+        extractionMethod: page?.extractionMethod ?? "",
         exactQuote: citation?.exactQuote ?? "",
+        contextBefore: context.before,
+        contextAfter: context.after,
         byteStart: citation?.canonicalByteStart ?? "",
         byteEnd: citation?.canonicalByteEnd ?? "",
-        canonicalSha256: citation?.canonicalArtifactSha256 ?? ""
+        originalSha256: citation.originalFileSha256,
+        canonicalSha256: citation?.canonicalArtifactSha256 ?? "",
+        parserVersion: citation.parserVersion
       }];
     });
 }
@@ -141,6 +161,15 @@ export async function exportXlsx(
           .join("")}</row>`
     )
     .join("");
+  const sheetColumns = keys
+    .map((key, index) => {
+      const wide = ["statement", "exactQuote", "contextBefore", "contextAfter"].includes(key);
+      const medium = ["source", "structuralPath", "reviewer", "reviewedAt"].includes(key);
+      return `<col min="${index + 1}" max="${index + 1}" width="${
+        wide ? 52 : medium ? 26 : 16
+      }" customWidth="1"/>`;
+    })
+    .join("");
   const zip = new JSZip();
   zip.file(
     "[Content_Types].xml",
@@ -164,7 +193,7 @@ export async function exportXlsx(
   );
   zip.folder("xl")?.folder("worksheets")?.file(
     "sheet1.xml",
-    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetData>${sheetRows}</sheetData></worksheet>`
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols>${sheetColumns}</cols><sheetData>${sheetRows}</sheetData><autoFilter ref="A1:${columnName(Math.max(0, keys.length - 1))}${matrix.length}"/></worksheet>`
   );
   const blob = await zip.generateAsync({
     type: "blob",
@@ -188,7 +217,10 @@ export async function exportDocx(
       }),
       new Paragraph({ text: `“${row.exactQuote}”` }),
       new Paragraph({
-        text: `${row.source}${row.page ? `, page ${row.page}` : ""} · UTF-8 bytes ${row.byteStart}–${row.byteEnd}`
+        text: `${row.source}${row.page ? `, page ${row.page} of ${row.pageCount}` : ""} · ${row.structuralPath || "structural span"} · UTF-8 bytes ${row.byteStart}–${row.byteEnd}`
+      }),
+      new Paragraph({
+        text: `${row.type}${row.eventDate ? ` · Event date ${row.eventDate}` : ""} · ${row.verification} · ${row.reviewer ?? "Automatic verification"}`
       })
     ])
   ];
