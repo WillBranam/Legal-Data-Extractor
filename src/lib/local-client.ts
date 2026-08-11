@@ -1,13 +1,14 @@
 "use client";
 
 import type { EvidenceDocument, FactRecord } from "@/lib/types";
-import type { LocalExtractionProposal } from "@/lib/local-llm";
+import type { LocalExtractionResult } from "@/lib/local-llm";
 
 export interface LocalRuntimeStatus {
   enabled: boolean;
   configured: boolean;
   authenticated: boolean;
   username: string | null;
+  accessMode: "macos-keychain" | "legacy-password";
   storage: "encrypted-local-vault";
   networkBoundary: "loopback-only";
   audit: {
@@ -111,19 +112,18 @@ export async function downloadOriginalFile(
 
 export async function extractDocumentWithLocalModel(
   document: EvidenceDocument
-): Promise<LocalExtractionProposal[]> {
+): Promise<LocalExtractionResult> {
   const body = JSON.stringify({ document });
   if (new TextEncoder().encode(body).byteLength > 20 * 1024 * 1024) {
     throw new Error("EXTRACTION_REQUEST_TOO_LARGE");
   }
-  const result = await localRequest<{ proposals: LocalExtractionProposal[] }>(
+  return localRequest<LocalExtractionResult>(
     "/api/local/extract",
     {
       method: "POST",
       body
     }
   );
-  return result.proposals;
 }
 
 export async function selectFactsWithLocalModel(input: {

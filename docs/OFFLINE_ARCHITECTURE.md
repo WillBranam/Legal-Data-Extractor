@@ -14,7 +14,8 @@ workstation, workforce, or legal process as HIPAA compliant.
 
 ```mermaid
 flowchart LR
-    User["Authenticated reviewer"] --> Browser["Browser UI on 127.0.0.1"]
+    User["Signed-in macOS user"] --> Browser["Browser UI on 127.0.0.1"]
+    Keychain["macOS Keychain"] --> LocalAPI
     Browser --> LocalAPI["Same-origin Next.js local API"]
     Browser --> OCR["Bundled browser OCR"]
 
@@ -26,8 +27,8 @@ flowchart LR
 
     Ollama --> Extract["Structured fact candidates"]
     Extract --> Verify["Exact quote and UTF-8 byte verification"]
-    Verify --> Review["Human review gate"]
-    Review --> Query["Approved-record query"]
+    Verify --> Consensus["Separate model-review passes"]
+    Consensus --> Query["Verified-source query"]
 ```
 
 Both application and model endpoints must use a loopback address. The server
@@ -38,14 +39,15 @@ URLs that do not use `http://127.0.0.1`, `http://localhost`, or `http://[::1]`.
 
 ### Local application
 
-- password-derived encryption key using scrypt;
+- random encryption key protected by the signed-in user's macOS Keychain;
 - AES-256-GCM encryption for source documents and workspace state;
 - private filesystem permissions on the vault directory and files;
-- HTTP-only, same-site local sessions with idle and absolute expiration;
+- operating-system account identity for the single-user appliance;
 - same-origin mutation checks;
 - encrypted retention of original source bytes;
-- authenticated reviewer identity and append-only review-decision history;
-- HMAC hash-chained audit records;
+- append-only automatic verification and review-decision history;
+- HMAC hash-chained audit records with a separately protected macOS Keychain
+  head checkpoint for rollback detection;
 - legal-hold deletion enforcement;
 - encrypted backup generation;
 - file, batch, PDF-page, decoded-pixel, render-pixel, and request-size limits;
@@ -64,7 +66,7 @@ Ollama receives canonical page text over loopback. The gateway:
 - treats source instructions as untrusted evidence;
 - requires structured JSON output;
 - discards any quotation that is not present at an exact canonical byte range;
-- creates only pending records;
+- publishes only exact server-verified source spans as authoritative claims;
 - uses the model for query selection only, while deterministic code retrieves
   and verifies the selected facts and citations.
 
@@ -90,9 +92,10 @@ The firm must supply the controls that an application cannot:
 5. Canonical text, hashes, page provenance, and OCR provenance are created.
 6. Canonical page text is sent only to loopback Ollama.
 7. Model-returned quotations are matched to exact canonical UTF-8 bytes.
-8. Proposed facts enter the pending review queue.
-9. An authenticated reviewer approves or rejects each fact.
-10. The query model may select approved fact IDs; application code verifies
+8. Two separate review passes must agree on each proposed source span.
+9. Application code rehydrates the exact quotation; model-authored summaries
+   are not promoted as authoritative claims.
+10. The query model may select verified fact IDs; application code verifies
     every citation before display.
 11. Exports contain approved, source-linked records and are recorded in the
     local audit log.
@@ -108,4 +111,4 @@ The firm must supply the controls that an application cannot:
 
 The public Vercel profile must never be changed into the PHI profile merely by
 setting `PHI_MODE`. Local technical mode requires `LOCAL_ONLY_MODE=enabled`,
-loopback binding, authenticated vault setup, and successful readiness checks.
+loopback binding, macOS Keychain access, and successful readiness checks.

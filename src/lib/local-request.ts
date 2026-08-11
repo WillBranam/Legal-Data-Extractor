@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import {
   authenticateLocalSession,
   localOnlyModeEnabled,
+  osAccountLocalSession,
   verifyAuditChain
 } from "@/lib/local-vault";
 
@@ -82,9 +83,9 @@ export function readCookie(request: Request, name: string): string | null {
 
 export async function requireLocalSession(request: Request, mutation = false) {
   assertLocalRequest(request, mutation);
-  const session = await authenticateLocalSession(
-    readCookie(request, LOCAL_SESSION_COOKIE)
-  );
+  const session =
+    (await authenticateLocalSession(readCookie(request, LOCAL_SESSION_COOKIE))) ??
+    (await osAccountLocalSession());
   if (!session) throw new Error("AUTHENTICATION_REQUIRED");
   if (mutation && !(await verifyAuditChain(session)).valid) {
     throw new Error("AUDIT_CHAIN_INVALID");

@@ -1,0 +1,69 @@
+{
+  "matter": "Elena Rivera v. Northstar Logistics LLC",
+  "synthetic": true,
+  "expected_core_facts": [
+    {
+      "fact": "Collision occurred on March 12, 2025 at approximately 8:14 a.m.",
+      "source": "01_case_fact_sheet.txt"
+    },
+    {
+      "fact": "Owen Price drove a Northstar Logistics delivery van.",
+      "source": "01_case_fact_sheet.txt"
+    },
+    {
+      "fact": "Price reported looking down at the route screen immediately before entering the intersection.",
+      "source": "02_dispatch_email.eml"
+    },
+    {
+      "fact": "Price acknowledged the dispatch message at 8:13:51 a.m.",
+      "source": "02_dispatch_email.eml"
+    },
+    {
+      "fact": "Dr. Miriam Chen assessed acute cervical strain and right-shoulder contusion.",
+      "source": "03_medical_treatment_summary.docx"
+    },
+    {
+      "fact": "Medical charges total $5,020.00.",
+      "source": "03_medical_treatment_summary.docx"
+    },
+    {
+      "fact": "Marcus Lee's view of the traffic signal was partly blocked.",
+      "source": "04_deposition_excerpt.pdf"
+    },
+    {
+      "fact": "Marcus Lee could not rule out that the signal changed before impact.",
+      "source": "04_deposition_excerpt.pdf"
+    },
+    {
+      "fact": "Documented economic damages total $16,452.75.",
+      "source": "05_damages_ledger.pdf"
+    },
+    {
+      "fact": "Store camera timestamp shows impact at 08:14:37.",
+      "source": "06_investigator_field_note_scan.png"
+    }
+  ],
+  "expected_conflicts": [
+    {
+      "issue": "traffic signal",
+      "positions": [
+        "Rivera alleges the signal changed from yellow to red.",
+        "Northstar contends the signal was green.",
+        "Marcus Lee thought it looked green but his view was obstructed and he could not rule out a change."
+      ]
+    }
+  ],
+  "must_not_assert": [
+    "Northstar admitted liability.",
+    "Marcus Lee had an unobstructed view of the signal.",
+    "The documented $16,452.75 total includes noneconomic damages."
+  ],
+  "test_questions": [
+    "What happened and when?",
+    "What evidence concerns the route screen?",
+    "What are the documented economic damages?",
+    "What conflicts exist about the traffic signal?",
+    "Did Northstar admit liability?",
+    "What medical treatment did Elena Rivera receive?"
+  ]
+}

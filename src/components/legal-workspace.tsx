@@ -17,6 +17,7 @@ import {
   Gauge,
   Gavel,
   LayoutDashboard,
+  LoaderCircle,
   Menu,
   MessageSquareText,
   PanelRightClose,
@@ -37,6 +38,7 @@ import {
 import {
   createCitation,
   readCanonicalByteRange,
+  readCitationContext,
   verifyCitation
 } from "@/lib/evidence";
 import {
@@ -88,7 +90,7 @@ const navItems: Array<{
 }> = [
   { id: "overview", label: "Home", icon: LayoutDashboard },
   { id: "documents", label: "Documents", icon: FileText },
-  { id: "review", label: "Review", icon: FileCheck2 },
+  { id: "review", label: "Verification", icon: FileCheck2 },
   { id: "query", label: "Ask the case", icon: MessageSquareText },
   { id: "exports", label: "Export", icon: Download },
   { id: "settings", label: "Settings", icon: Settings }
@@ -97,7 +99,7 @@ const navItems: Array<{
 const viewLabels: Record<View, string> = {
   overview: "Home",
   documents: "Documents",
-  review: "Review",
+  review: "Verification",
   query: "Ask the case",
   exports: "Export",
   settings: "Settings"
@@ -127,12 +129,33 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function citationContext(citation: Citation, document: WorkspaceState["documents"][number]) {
+  try {
+    return readCitationContext(
+      document.canonicalText,
+      citation.canonicalByteStart,
+      citation.canonicalByteEnd
+    );
+  } catch {
+    return { before: "", exactQuote: citation.exactQuote, after: "" };
+  }
+}
+
 interface ImportPerformance {
   files: number;
   bytes: number;
   pages: number;
   ocrPages: number;
   durationMs: number;
+}
+
+interface ProcessingStatus {
+  phase: "parsing" | "agent-review" | "verifying" | "saving";
+  fileName: string;
+  fileNumber: number;
+  totalFiles: number;
+  message: string;
+  progress: number | null;
 }
 
 export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
@@ -145,7 +168,10 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
   const [selectedCitationId, setSelectedCitationId] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [querying, setQuerying] = useState(false);
   const [importProgress, setImportProgress] = useState<ParseProgress | null>(null);
+  const [processingStatus, setProcessingStatus] =
+    useState<ProcessingStatus | null>(null);
   const [importPerformance, setImportPerformance] =
     useState<ImportPerformance | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -244,7 +270,9 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
     workspace?.facts.filter((fact) => fact.status === "pending") ?? [];
 
   async function runQuery() {
-    if (!workspace || question.trim().length === 0) return;
+    if (!workspace || question.trim().length === 0 || importing || querying) return;
+    setQuerying(true);
+    setNotice(null);
     try {
       let queryFacts = workspace.facts;
       if (localMode) {
@@ -255,7 +283,7 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
             claims: []
           };
           setAnswer(unavailable);
-          setNotice("The approved record was not queried because the local model is unavailable.");
+          setNotice("The verified record was not queried because the local model is unavailable.");
           setView("query");
           return;
         }
@@ -283,8 +311,10 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
       }
     } catch (error) {
       setNotice(
-        error instanceof Error ? error.message : "The approved record could not be queried."
+        error instanceof Error ? error.message : "The verified record could not be queried."
       );
+    } finally {
+      setQuerying(false);
     }
   }
 
@@ -328,7 +358,7 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
         });
       }
       await updateWorkspace(next);
-      setNotice(status === "approved" ? "Fact approved and queryable." : "Fact rejected.");
+      setNotice(status === "approved" ? "Fact verified and queryable." : "Fact withheld.");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "The review could not be saved.");
     }
@@ -349,6 +379,15 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
       return;
     }
     setImporting(true);
+    setAnswer(null);
+    setProcessingStatus({
+      phase: "parsing",
+      fileName: selectedFiles[0].name,
+      fileNumber: 1,
+      totalFiles: selectedFiles.length,
+      message: `Preparing ${selectedFiles[0].name}`,
+      progress: 0
+    });
     setNotice(null);
     setImportPerformance(null);
     const startedAt = performance.now();
@@ -356,15 +395,29 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
     const documents = [...workspace.documents];
     const citations = [...workspace.citations];
     const facts = [...workspace.facts];
+    const reviewDecisions = [...workspace.reviewDecisions];
     const importedDocuments: WorkspaceState["documents"] = [];
     const errors: string[] = [];
     const extractionErrors: string[] = [];
+    let consensusApproved = 0;
+    let withheldByReview = 0;
     try {
-      for (const file of selectedFiles) {
+      for (const [fileIndex, file] of selectedFiles.entries()) {
         try {
           const document = await parseLocalFile(file, {
             ocrSession,
-            onProgress: setImportProgress
+            onProgress: (progress) => {
+              setImportProgress(progress);
+              setProcessingStatus({
+                phase: "parsing",
+                fileName: file.name,
+                fileNumber: fileIndex + 1,
+                totalFiles: selectedFiles.length,
+                message: progress.message,
+                progress:
+                  (fileIndex + progress.progress * 0.55) / selectedFiles.length
+              });
+            }
           });
           if (localMode) {
             await storeOriginalFile(document.id, file);
@@ -377,8 +430,28 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
           ) {
             if (localMode) {
               try {
-                const proposals = await extractDocumentWithLocalModel(document);
-                for (const proposal of proposals) {
+                setProcessingStatus({
+                  phase: "agent-review",
+                  fileName: file.name,
+                  fileNumber: fileIndex + 1,
+                  totalFiles: selectedFiles.length,
+                  message:
+                    "Extracting facts and running two separate evidence reviews",
+                  progress: null
+                });
+                const extraction = await extractDocumentWithLocalModel(document);
+                consensusApproved += extraction.reviewSummary.consensusApproved;
+                withheldByReview += extraction.reviewSummary.withheld;
+                setProcessingStatus({
+                  phase: "verifying",
+                  fileName: file.name,
+                  fileNumber: fileIndex + 1,
+                  totalFiles: selectedFiles.length,
+                  message: `Byte-verifying ${extraction.proposals.length} consensus facts`,
+                  progress:
+                    (fileIndex + 0.9) / selectedFiles.length
+                });
+                for (const proposal of extraction.proposals) {
                   const citation: Citation = {
                     id: crypto.randomUUID(),
                     documentId: document.id,
@@ -392,18 +465,30 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
                     parserVersion: document.parserVersion
                   };
                   if (!(await verifyCitation(citation, document)).verified) continue;
+                  const factId = crypto.randomUUID();
+                  const reviewedAt = new Date().toISOString();
                   citations.push(citation);
                   facts.push({
-                    id: crypto.randomUUID(),
+                    id: factId,
                     matterId: workspace.matter.id,
                     type: proposal.type,
-                    statement: proposal.statement,
+                    // Only the deterministic, byte-matched source span becomes
+                    // an authoritative claim. Model summaries stay untrusted.
+                    statement: proposal.exactQuote,
                     eventDate: proposal.eventDate,
                     confidence: proposal.confidence,
-                    status: "pending",
+                    status: "approved",
                     citationIds: [citation.id],
-                    reviewer: null,
-                    reviewedAt: null
+                    reviewer: "3-pass local model consensus",
+                    reviewedAt
+                  });
+                  reviewDecisions.push({
+                    id: crypto.randomUUID(),
+                    factId,
+                    reviewer: "3-pass local model consensus",
+                    decision: "approved",
+                    priorStatus: "pending",
+                    occurredAt: reviewedAt
                   });
                 }
               } catch {
@@ -456,48 +541,76 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
               });
             }
           }
-        } catch {
-          errors.push(file.name);
+        } catch (error) {
+          errors.push(
+            `${file.name}: ${
+              error instanceof Error ? error.message : "unknown processing error"
+            }`
+          );
         }
       }
     } finally {
       await ocrSession.terminate().catch(() => undefined);
     }
-    await updateWorkspace({
-      ...workspace,
-      documents,
-      citations,
-      facts,
-      matter: { ...workspace.matter, updatedAt: new Date().toISOString() }
-    });
-    setImporting(false);
-    setImportProgress(null);
-    setView("documents");
-    setImportPerformance({
-      files: importedDocuments.length,
-      bytes: importedDocuments.reduce((total, document) => total + document.size, 0),
-      pages: importedDocuments.reduce(
-        (total, document) => total + document.pageCount,
-        0
-      ),
-      ocrPages: importedDocuments.reduce(
-        (total, document) => total + document.ocrPageCount,
-        0
-      ),
-      durationMs: performance.now() - startedAt
-    });
-    setNotice(
-      [
-        `${importedDocuments.length} file${importedDocuments.length === 1 ? "" : "s"} processed locally.`,
-        errors.length > 0 ? `${errors.length} could not be read.` : "",
-        extractionErrors.length > 0
-          ? `${extractionErrors.length} could not be extracted by the local model; the encrypted source remains available for retry.`
-          : "",
-        "No source file was transmitted outside this workstation."
-      ].filter(Boolean).join(" ")
-    );
-    if (fileInputRef.current) fileInputRef.current.value = "";
-    if (folderInputRef.current) folderInputRef.current.value = "";
+    try {
+      setProcessingStatus({
+        phase: "saving",
+        fileName: selectedFiles.at(-1)?.name ?? "Matter",
+        fileNumber: selectedFiles.length,
+        totalFiles: selectedFiles.length,
+        message: "Encrypting and committing the verified record",
+        progress: 0.98
+      });
+      await updateWorkspace({
+        ...workspace,
+        documents,
+        citations,
+        facts,
+        reviewDecisions,
+        matter: { ...workspace.matter, updatedAt: new Date().toISOString() }
+      });
+      setView("documents");
+      setImportPerformance({
+        files: importedDocuments.length,
+        bytes: importedDocuments.reduce((total, document) => total + document.size, 0),
+        pages: importedDocuments.reduce(
+          (total, document) => total + document.pageCount,
+          0
+        ),
+        ocrPages: importedDocuments.reduce(
+          (total, document) => total + document.ocrPageCount,
+          0
+        ),
+        durationMs: performance.now() - startedAt
+      });
+      setNotice(
+        [
+          `${importedDocuments.length} file${importedDocuments.length === 1 ? "" : "s"} processed locally.`,
+          errors.length > 0
+            ? `${errors.length} could not be read (${errors.join("; ")}).`
+            : "",
+          extractionErrors.length > 0
+            ? `${extractionErrors.length} could not be extracted by the local model; the encrypted source remains available for retry.`
+            : "",
+          localMode
+            ? `${consensusApproved} facts passed both model reviews and exact byte verification; ${withheldByReview} were withheld because the agents did not agree.`
+            : "",
+          "No source file was transmitted outside this workstation."
+        ].filter(Boolean).join(" ")
+      );
+    } catch (error) {
+      setNotice(
+        error instanceof Error
+          ? error.message
+          : "The verified record could not be saved."
+      );
+    } finally {
+      setImporting(false);
+      setImportProgress(null);
+      setProcessingStatus(null);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      if (folderInputRef.current) folderInputRef.current.value = "";
+    }
   }
 
   async function clearLocalMatter() {
@@ -547,6 +660,7 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
     return (
       <main className="loading-screen">
         <div className="brand-mark">VC</div>
+        <LoaderCircle className="spinner" size={22} aria-hidden />
         <p>{accessError ?? "Opening the private matter workspace…"}</p>
       </main>
     );
@@ -571,7 +685,9 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
             <button
               key={id}
               className={`nav-item ${view === id ? "active" : ""}`}
+              disabled={importing && (id === "query" || id === "exports")}
               onClick={() => {
+                if (importing && (id === "query" || id === "exports")) return;
                 setView(id);
                 setSidebarOpen(false);
               }}
@@ -643,7 +759,14 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
           </div>
         ) : null}
 
-        <div className={`content-frame ${selectedCitation ? "with-inspector" : ""}`}>
+        {processingStatus ? (
+          <ProcessingRail status={processingStatus} />
+        ) : null}
+
+        <div
+          className={`content-frame ${selectedCitation ? "with-inspector" : ""}`}
+          aria-busy={importing || querying}
+        >
           <main className="main-content">
             <input
               ref={fileInputRef}
@@ -664,10 +787,12 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
             {view === "overview" ? (
               <OverviewView
                 workspace={workspace}
+                encryptedStorage={localMode}
                 pendingCount={pendingFacts.length}
                 approvedCount={approvedCount}
                 importing={importing}
                 importProgress={importProgress}
+                processingStatus={processingStatus}
                 onAddFiles={() => fileInputRef.current?.click()}
                 onAddFolder={() => folderInputRef.current?.click()}
                 onNavigate={setView}
@@ -680,6 +805,9 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
                 approvedCount={approvedCount}
                 question={question}
                 answer={answer}
+                processing={importing}
+                querying={querying}
+                automaticReview={localMode}
                 selectedCitationId={selectedCitationId}
                 onQuestionChange={setQuestion}
                 onRunQuery={runQuery}
@@ -693,6 +821,7 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
                 workspace={workspace}
                 importing={importing}
                 importProgress={importProgress}
+                processingStatus={processingStatus}
                 importPerformance={importPerformance}
                 fileInputRef={fileInputRef}
                 folderInputRef={folderInputRef}
@@ -703,15 +832,19 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
               <section className="page-section">
                 <div className="page-heading">
                   <div>
-                    <span className="small-label">Human review gate</span>
-                    <h1>Review queue</h1>
+                    <span className="small-label">
+                      {localMode ? "Automatic verification log" : "Verification log"}
+                    </span>
+                    <h1>Verified facts</h1>
                     <p>
-                      Drafts remain excluded from natural-language answers until approved.
+                      {localMode
+                        ? "Local extraction uses three role-separated model passes. Only unanimous, byte-matched facts enter the queryable record."
+                        : "This browser-only pilot has no model endpoint. Facts require a local reviewer and an exact byte match before they become queryable."}
                     </p>
                   </div>
                 </div>
                 <ReviewTable
-                  facts={pendingFacts}
+                  facts={workspace.facts.filter((fact) => fact.status !== "rejected")}
                   citations={workspace.citations}
                   documents={workspace.documents}
                   onReview={reviewFact}
@@ -725,6 +858,7 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
               <ExportsView
                 workspace={workspace}
                 auditExports={localMode}
+                disabled={importing}
                 onError={setNotice}
               />
             ) : null}
@@ -733,7 +867,11 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
               <SettingsView
                 onReset={clearLocalMatter}
                 localStatus={localStatus}
-                onSignOut={localMode ? signOutLocal : undefined}
+                onSignOut={
+                  localMode && localStatus?.accessMode === "legacy-password"
+                    ? signOutLocal
+                    : undefined
+                }
                 legalHold={workspace.matter.legalHold}
                 onLegalHoldChange={setLegalHold}
               />
@@ -794,10 +932,10 @@ function LocalAccessScreen({
       <section className="local-access-card">
         <div className="brand-mark">VC</div>
         <span className="small-label">Offline local appliance</span>
-        <h1>{configured ? "Unlock the evidence vault" : "Configure this workstation"}</h1>
+        <h1>{configured ? "Unlock the legacy evidence vault" : "Configure this workstation"}</h1>
         <p>
-          Evidence is encrypted on this workstation. The local model and OCR are
-          reachable only over the loopback interface.
+          This screen appears only for a password vault created by an earlier
+          version. New local workspaces open through the signed-in macOS account.
         </p>
         <form
           onSubmit={(event) => {
@@ -841,8 +979,12 @@ function LocalAccessScreen({
             </div>
           ) : null}
           <button className="primary-button" type="submit" disabled={working}>
-            <FolderLock size={17} />
-            {working ? "Opening vault…" : configured ? "Unlock vault" : "Create vault"}
+            {working ? (
+              <LoaderCircle className="spinner" size={17} />
+            ) : (
+              <FolderLock size={17} />
+            )}
+            {working ? "Opening vault…" : configured ? "Unlock legacy vault" : "Create vault"}
           </button>
         </form>
         <div className="local-access-boundary">
@@ -857,21 +999,58 @@ function LocalAccessScreen({
   );
 }
 
+function ProcessingRail({ status }: { status: ProcessingStatus }) {
+  const phaseLabels: Record<ProcessingStatus["phase"], string> = {
+    parsing: "Reading and OCR",
+    "agent-review": "Three-pass agent review",
+    verifying: "Deterministic citation check",
+    saving: "Encrypted record commit"
+  };
+  return (
+    <section className="processing-rail" role="status" aria-live="polite">
+      <LoaderCircle className="spinner" size={20} aria-hidden />
+      <div className="processing-rail-copy">
+        <span className="small-label">{phaseLabels[status.phase]}</span>
+        <strong>{status.message}</strong>
+        <span>
+          File {status.fileNumber} of {status.totalFiles}: {status.fileName}
+        </span>
+      </div>
+      <div className="processing-rail-progress">
+        <span>Query and export locked until verification finishes</span>
+        {status.progress === null ? (
+          <progress aria-label="Processing" />
+        ) : (
+          <progress
+            aria-label="Processing"
+            max={1}
+            value={status.progress}
+          />
+        )}
+      </div>
+    </section>
+  );
+}
+
 function OverviewView({
   workspace,
+  encryptedStorage,
   pendingCount,
   approvedCount,
   importing,
   importProgress,
+  processingStatus,
   onAddFiles,
   onAddFolder,
   onNavigate
 }: {
   workspace: WorkspaceState;
+  encryptedStorage: boolean;
   pendingCount: number;
   approvedCount: number;
   importing: boolean;
   importProgress: ParseProgress | null;
+  processingStatus: ProcessingStatus | null;
   onAddFiles: () => void;
   onAddFolder: () => void;
   onNavigate: (view: View) => void;
@@ -881,7 +1060,18 @@ function OverviewView({
   const reviewComplete =
     hasExtractedFacts && pendingCount === 0 && approvedCount > 0;
 
-  const nextAction = !hasDocuments
+  const nextAction = importing
+    ? {
+        eyebrow: "Record preparation in progress",
+        title: processingStatus?.message ?? "Processing the case file",
+        description:
+          "Query and export stay locked until extraction, separate model review passes, byte verification, and encrypted save all finish.",
+        action: () => undefined,
+        actionLabel: "Processing locally…",
+        secondaryAction: () => onNavigate("documents"),
+        secondaryLabel: "View processing details"
+      }
+    : !hasDocuments
     ? {
         eyebrow: "Start here",
         title: "Add the case file",
@@ -895,11 +1085,11 @@ function OverviewView({
     : pendingCount > 0
       ? {
           eyebrow: "Next step",
-          title: `Review ${pendingCount} proposed ${pendingCount === 1 ? "fact" : "facts"}`,
+          title: `Resolve ${pendingCount} legacy ${pendingCount === 1 ? "draft" : "drafts"}`,
           description:
-            "Confirm each proposed fact against its exact source quotation before it can be used in an answer.",
+            "These records predate automatic consensus review and remain withheld until resolved.",
           action: () => onNavigate("review"),
-          actionLabel: "Open review queue",
+          actionLabel: "Open verification register",
           secondaryAction: () => onNavigate("documents"),
           secondaryLabel: "View documents"
         }
@@ -908,11 +1098,11 @@ function OverviewView({
             eyebrow: "Matter ready",
             title: "Ask a question about the record",
             description:
-              "Answers use approved facts only. Every claim opens to a byte-matched source quotation.",
+              "Answers use consensus-verified facts only. Every claim opens to a byte-matched source quotation.",
             action: () => onNavigate("query"),
             actionLabel: "Ask the case",
             secondaryAction: () => onNavigate("exports"),
-            secondaryLabel: "Export approved facts"
+            secondaryLabel: "Export verified facts"
           }
         : {
             eyebrow: "Check the record",
@@ -932,7 +1122,7 @@ function OverviewView({
           <span className="small-label">Matter workspace</span>
           <h1>{workspace.matter.name}</h1>
           <p>
-            Build a reviewed, source-linked record before relying on any extracted
+            Build a verified, source-linked record before relying on any extracted
             information.
           </p>
         </div>
@@ -960,21 +1150,31 @@ function OverviewView({
           label="Extract evidence"
           detail={hasExtractedFacts ? `${workspace.facts.length} proposed facts` : "Not started"}
           state={
-            hasExtractedFacts ? "complete" : hasDocuments ? "current" : "upcoming"
+            importing
+              ? "current"
+              : hasExtractedFacts
+                ? "complete"
+                : hasDocuments
+                  ? "current"
+                  : "upcoming"
           }
         />
         <CaseStep
           number="3"
-          label="Review facts"
+          label="Verify facts"
           detail={
-            pendingCount > 0
+            importing
+              ? "Agents reviewing"
+              : pendingCount > 0
               ? `${pendingCount} waiting`
               : reviewComplete
-                ? "Review complete"
+                ? "Consensus complete"
                 : "Not started"
           }
           state={
-            reviewComplete
+            importing
+              ? "current"
+              : reviewComplete
               ? "complete"
               : pendingCount > 0
                 ? "current"
@@ -984,8 +1184,14 @@ function OverviewView({
         <CaseStep
           number="4"
           label="Ask or export"
-          detail={approvedCount > 0 ? `${approvedCount} approved facts` : "Requires approval"}
-          state={approvedCount > 0 ? "current" : "upcoming"}
+          detail={
+            importing
+              ? "Locked during processing"
+              : approvedCount > 0
+                ? `${approvedCount} verified facts`
+                : "Requires verified facts"
+          }
+          state={!importing && approvedCount > 0 ? "current" : "upcoming"}
         />
       </ol>
 
@@ -1013,10 +1219,19 @@ function OverviewView({
               {nextAction.secondaryLabel}
             </button>
           </div>
-          {importing && importProgress ? (
+          {importing && (processingStatus || importProgress) ? (
             <div className="inline-progress" role="status" aria-live="polite">
-              <span>{importProgress.message}</span>
-              <progress max={1} value={importProgress.progress} />
+              <span>
+                {processingStatus?.message ?? importProgress?.message}
+              </span>
+              {processingStatus?.progress === null ? (
+                <progress />
+              ) : (
+                <progress
+                  max={1}
+                  value={processingStatus?.progress ?? importProgress?.progress ?? 0}
+                />
+              )}
             </div>
           ) : null}
         </section>
@@ -1050,20 +1265,20 @@ function OverviewView({
             icon={FileText}
             label="Documents"
             value={String(workspace.documents.length)}
-            detail="Stored in this browser"
+            detail={encryptedStorage ? "Encrypted on this Mac" : "Stored in this browser"}
           />
           <Metric
             icon={FileCheck2}
-            label="Awaiting review"
+          label="Awaiting verification"
             value={String(pendingCount)}
-            detail="Not yet queryable"
+            detail={importing ? "Verification in progress" : "Withheld from queries"}
             tone={pendingCount > 0 ? "copper" : "blue"}
           />
           <Metric
             icon={ShieldCheck}
-            label="Approved facts"
+            label="Verified facts"
             value={String(approvedCount)}
-            detail="Available for answers"
+            detail={importing ? "Locked while processing" : "Available for answers"}
             tone="green"
           />
           <Metric
@@ -1108,6 +1323,9 @@ function QueryView({
   approvedCount,
   question,
   answer,
+  processing,
+  querying,
+  automaticReview,
   selectedCitationId,
   onQuestionChange,
   onRunQuery,
@@ -1118,6 +1336,9 @@ function QueryView({
   approvedCount: number;
   question: string;
   answer: QueryAnswer | null;
+  processing: boolean;
+  querying: boolean;
+  automaticReview: boolean;
   selectedCitationId: string | null;
   onQuestionChange: (value: string) => void;
   onRunQuery: () => Promise<void>;
@@ -1130,48 +1351,76 @@ function QueryView({
   const documentsById = new Map(
     workspace.documents.map((document) => [document.id, document])
   );
-  const canQuery = approvedCount > 0;
+  const factsById = new Map(workspace.facts.map((fact) => [fact.id, fact]));
+  const canQuery = approvedCount > 0 && !processing;
+  const resultDocumentCount = answer
+    ? new Set(
+        answer.claims.flatMap((claim) =>
+          claim.citationIds.flatMap((citationId) => {
+            const citation = citationsById.get(citationId);
+            return citation ? [citation.documentId] : [];
+          })
+        )
+      ).size
+    : 0;
 
   return (
     <section className="query-page">
       <header className="page-heading query-heading">
         <div>
-          <span className="small-label">Approved record only</span>
+          <span className="small-label">Verified record only</span>
           <h1>Ask the case</h1>
           <p>
-            Ask in plain language. Answers are limited to approved facts and open
-            directly to exact source text.
+            Ask in plain language. Answers are limited to{" "}
+            {automaticReview ? "consensus-reviewed" : "reviewer-approved"} facts
+            and show the exact location and surrounding source context.
           </p>
         </div>
         <span className="record-count">
-          <strong>{approvedCount}</strong> approved {approvedCount === 1 ? "fact" : "facts"}
+          <strong>{approvedCount}</strong> verified {approvedCount === 1 ? "fact" : "facts"}
         </span>
       </header>
 
-      {!canQuery ? (
+      {processing ? (
+        <div className="query-locked processing">
+          <LoaderCircle className="spinner" size={24} />
+          <div>
+            <strong>The case record is still being verified</strong>
+            <p>
+              Search remains locked until parsing, local-agent consensus, exact
+              citation checks, and encrypted storage have all completed.
+            </p>
+          </div>
+          <button className="primary-button" onClick={() => onNavigate("documents")}>
+            View processing status
+            <ArrowRight size={16} />
+          </button>
+        </div>
+      ) : !canQuery ? (
         <div className="query-locked">
           <FileCheck2 size={24} />
           <div>
-            <strong>Approve facts before asking questions</strong>
+            <strong>Add evidence before asking questions</strong>
             <p>
-              Drafts are intentionally excluded. Add documents and complete review
-              before the case record can answer a question.
+              The queryable record opens automatically after the local agents reach
+              consensus and every citation passes deterministic byte verification.
             </p>
           </div>
           <button
             className="primary-button"
             onClick={() =>
-              onNavigate(workspace.documents.length > 0 ? "review" : "documents")
+              onNavigate("documents")
             }
           >
-            {workspace.documents.length > 0 ? "Go to review" : "Add documents"}
+            {workspace.documents.length > 0 ? "View documents" : "Add documents"}
             <ArrowRight size={16} />
           </button>
         </div>
       ) : (
         <section className="query-panel">
           <form
-            className="query-form"
+            className={`query-form ${querying ? "querying" : ""}`}
+            aria-busy={querying}
             onSubmit={(event) => {
               event.preventDefault();
               void onRunQuery();
@@ -1183,13 +1432,27 @@ function QueryView({
               onChange={(event) => onQuestionChange(event.target.value)}
               aria-label="Ask a question about the matter"
               placeholder="For example: What happened before the March 12 meeting?"
+              disabled={querying}
             />
-            <button type="submit" disabled={question.trim().length === 0}>
-              Search record
+            <button
+              type="submit"
+              disabled={question.trim().length === 0 || querying}
+            >
+              {querying ? (
+                <>
+                  <LoaderCircle className="spinner" size={16} />
+                  Checking record…
+                </>
+              ) : (
+                "Search record"
+              )}
             </button>
           </form>
           <div className="query-rules">
-            <span><CheckCircle2 size={14} /> Approved facts only</span>
+            <span>
+              <CheckCircle2 size={14} />{" "}
+              {automaticReview ? "Consensus-reviewed" : "Reviewer-approved"} facts only
+            </span>
             <span><CheckCircle2 size={14} /> Exact source quotations</span>
             <span><CheckCircle2 size={14} /> Unsupported claims withheld</span>
           </div>
@@ -1197,7 +1460,17 @@ function QueryView({
           {answer ? (
             <>
               <div className="answer-header">
-                <span className="small-label">Answer from the record</span>
+                <div>
+                  <span className="small-label">Answer from the record</span>
+                  {answer.claims.length > 0 ? (
+                    <strong>
+                      {answer.claims.length} verified{" "}
+                      {answer.claims.length === 1 ? "finding" : "findings"} from{" "}
+                      {resultDocumentCount}{" "}
+                      {resultDocumentCount === 1 ? "document" : "documents"}
+                    </strong>
+                  ) : null}
+                </div>
                 <span
                   className={`answer-status ${
                     answer.status === "verified" ? "verified" : ""
@@ -1215,44 +1488,98 @@ function QueryView({
               {answer.claims.length ? (
                 <div className="claim-list">
                   {answer.claims.map((claim, index) => {
-                    const citation = citationsById.get(claim.citationIds[0]);
-                    const document = citation
-                      ? documentsById.get(citation.documentId)
-                      : undefined;
-                    return citation && document ? (
-                      <button
-                        key={claim.factId}
-                        className={`claim ${
-                          selectedCitationId === citation.id ? "selected" : ""
-                        }`}
-                        onClick={() => onSelectCitation(citation.id)}
-                      >
+                    const fact = factsById.get(claim.factId);
+                    const evidence = claim.citationIds.flatMap((citationId) => {
+                      const citation = citationsById.get(citationId);
+                      const document = citation
+                        ? documentsById.get(citation.documentId)
+                        : undefined;
+                      return citation && document ? [{ citation, document }] : [];
+                    });
+                    return evidence.length > 0 ? (
+                      <article key={claim.factId} className="claim">
                         <span className="claim-number">{index + 1}</span>
                         <span className="claim-body">
                           <span className="claim-statement">{claim.statement}</span>
-                          <span className="quote">“{citation.exactQuote}”</span>
-                          <span className="claim-source">
+                          <span className="claim-fact-meta">
+                            <span>{fact?.type ?? "Fact"}</span>
+                            {fact?.eventDate ? <span>Date: {fact.eventDate}</span> : null}
+                            {fact ? (
+                              <span>
+                                Extraction confidence{" "}
+                                {Math.round(fact.confidence * 100)}%
+                              </span>
+                            ) : null}
                             <span>
-                              {document.name}
-                              {citation.pageNumber ? ` · page ${citation.pageNumber}` : ""}
-                            </span>
-                            <span>
-                              UTF-8 bytes {citation.canonicalByteStart}–
-                              {citation.canonicalByteEnd}
+                              {fact?.reviewer === "3-pass local model consensus"
+                                ? "Three-pass consensus"
+                                : "Human verification"}
                             </span>
                           </span>
                         </span>
                         <span className="byte-verified">
                           <CheckCircle2 size={16} /> Verified
                         </span>
-                      </button>
+                        <div className="claim-evidence-list">
+                          {evidence.map(({ citation, document }) => {
+                            const context = citationContext(citation, document);
+                            const page = document.pages.find(
+                              (item) => item.pageNumber === citation.pageNumber
+                            );
+                            return (
+                              <button
+                                key={citation.id}
+                                className={`claim-evidence ${
+                                  selectedCitationId === citation.id ? "selected" : ""
+                                }`}
+                                onClick={() => onSelectCitation(citation.id)}
+                              >
+                                <span className="evidence-heading">
+                                  <strong>{document.name}</strong>
+                                  <span>
+                                    {citation.pageNumber
+                                      ? `Page ${citation.pageNumber} of ${document.pageCount}`
+                                      : "Structural text span"}
+                                    {page
+                                      ? ` · ${
+                                          page.extractionMethod === "ocr"
+                                            ? "local OCR"
+                                            : "native text"
+                                        }`
+                                      : ""}
+                                  </span>
+                                </span>
+                                <span className="context-label">
+                                  Surrounding source context
+                                </span>
+                                <span className="source-context">
+                                  {context.before ? `…${context.before}` : ""}
+                                  <mark>{context.exactQuote}</mark>
+                                  {context.after ? `${context.after}…` : ""}
+                                </span>
+                                <span className="claim-source">
+                                  <span>
+                                    {citation.structuralPath ??
+                                      `page-${citation.pageNumber ?? "unknown"}`}
+                                  </span>
+                                  <span>
+                                    UTF-8 bytes {citation.canonicalByteStart}–
+                                    {citation.canonicalByteEnd} · artifact{" "}
+                                    {shortHash(citation.canonicalArtifactSha256)}
+                                  </span>
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </article>
                     ) : null;
                   })}
                 </div>
               ) : (
                 <div className="empty-answer">
                   <ShieldCheck size={24} />
-                  <strong>The approved record does not support an answer.</strong>
+                  <strong>The verified record does not support an answer.</strong>
                   <p>Try a narrower question or review additional source material.</p>
                 </div>
               )}
@@ -1262,7 +1589,7 @@ function QueryView({
               <MessageSquareText size={22} />
               <strong>Ask about dates, people, events, or supporting evidence.</strong>
               <p>
-                The app will abstain when the approved record cannot support a
+                The app will abstain when the verified record cannot support a
                 response.
               </p>
             </div>
@@ -1321,14 +1648,16 @@ function ReviewTable({
     <section className={`review-panel ${expanded ? "expanded" : ""}`}>
       <div className="review-title">
         <div>
-          <span className="small-label">Review queue</span>
-          <strong>{facts.length} draft {facts.length === 1 ? "fact" : "facts"}</strong>
+          <span className="small-label">Verification register</span>
+          <strong>
+            {facts.length} {facts.length === 1 ? "fact" : "facts"} in register
+          </strong>
         </div>
       </div>
       {facts.length === 0 ? (
         <div className="table-empty">
           <CheckCircle2 size={20} />
-          All draft facts have been reviewed.
+          No verified facts are available yet.
         </div>
       ) : (
         <div className="table-scroll">
@@ -1338,8 +1667,8 @@ function ReviewTable({
                 <th>Fact</th>
                 <th>Type</th>
                 <th>Source</th>
-                <th>Confidence</th>
-                <th>Review action</th>
+                <th>Verification</th>
+                <th>Override</th>
               </tr>
             </thead>
             <tbody>
@@ -1363,24 +1692,30 @@ function ReviewTable({
                       </button>
                     </td>
                     <td>
-                      <div className="confidence">
-                        <span>{Math.round(fact.confidence * 100)}%</span>
-                        <div>
-                          <i style={{ width: `${fact.confidence * 100}%` }} />
-                        </div>
+                      <div className="verification-method">
+                        <strong>
+                          {fact.status === "approved"
+                            ? fact.reviewer === "3-pass local model consensus"
+                              ? "Consensus + byte match"
+                              : "Reviewer + byte match"
+                            : "Awaiting decision"}
+                        </strong>
+                        <span>{fact.reviewer ?? "Not reviewed"}</span>
                       </div>
                     </td>
                     <td>
                       <div className="review-actions">
-                        <button onClick={() => void onReview(fact.id, "approved")}>
-                          Approve
-                        </button>
+                        {fact.status === "pending" ? (
+                          <button onClick={() => void onReview(fact.id, "approved")}>
+                            Approve
+                          </button>
+                        ) : null}
                         <button
-                          className="reject"
+                          className={fact.status === "approved" ? "withdraw" : "reject"}
                           onClick={() => void onReview(fact.id, "rejected")}
-                          aria-label={`Reject ${fact.statement}`}
+                          aria-label={`Withhold ${fact.statement} from queries`}
                         >
-                          <X size={15} />
+                          {fact.status === "approved" ? "Withhold" : <X size={15} />}
                         </button>
                       </div>
                     </td>
@@ -1399,6 +1734,7 @@ function DocumentsView({
   workspace,
   importing,
   importProgress,
+  processingStatus,
   importPerformance,
   fileInputRef,
   folderInputRef
@@ -1406,6 +1742,7 @@ function DocumentsView({
   workspace: WorkspaceState;
   importing: boolean;
   importProgress: ParseProgress | null;
+  processingStatus: ProcessingStatus | null;
   importPerformance: ImportPerformance | null;
   fileInputRef: React.RefObject<HTMLInputElement | null>;
   folderInputRef: React.RefObject<HTMLInputElement | null>;
@@ -1451,17 +1788,31 @@ function DocumentsView({
           </p>
         </div>
       </div>
-      {importing && importProgress ? (
+      {importing && processingStatus ? (
         <div className="ocr-progress" role="status" aria-live="polite">
-          <Cpu size={20} />
+          {processingStatus.phase === "parsing" ? (
+            <Cpu size={20} />
+          ) : (
+            <LoaderCircle className="spinner" size={20} />
+          )}
           <div>
-            <strong>{importProgress.message}</strong>
+            <strong>{processingStatus.message}</strong>
             <span>
-              {importProgress.pageNumber && importProgress.totalPages
+              {processingStatus.phase === "parsing" &&
+              importProgress?.pageNumber &&
+              importProgress.totalPages
                 ? `Page ${importProgress.pageNumber} of ${importProgress.totalPages}`
-                : "Preparing local evidence"}
+                : processingStatus.phase === "agent-review"
+                  ? "Extractor → evidence-support reviewer → adversarial reviewer"
+                  : processingStatus.phase === "verifying"
+                    ? "Checking file hash, canonical hash, byte bounds, and exact text"
+                    : "Saving the complete verified record atomically"}
             </span>
-            <progress max={1} value={importProgress.progress} />
+            {processingStatus.progress === null ? (
+              <progress />
+            ) : (
+              <progress max={1} value={processingStatus.progress} />
+            )}
           </div>
         </div>
       ) : null}
@@ -1534,10 +1885,12 @@ function DocumentsView({
 function ExportsView({
   workspace,
   auditExports,
+  disabled,
   onError
 }: {
   workspace: WorkspaceState;
   auditExports: boolean;
+  disabled: boolean;
   onError: (message: string) => void;
 }) {
   const args = [workspace.facts, workspace.citations, workspace.documents] as const;
@@ -1546,7 +1899,6 @@ function ExportsView({
     action: () => void | Promise<void>
   ) => {
     try {
-      await action();
       if (auditExports) {
         await recordLocalAuditEvent({
           action: `export.${format}`,
@@ -1554,6 +1906,7 @@ function ExportsView({
           resourceId: workspace.matter.id
         });
       }
+      await action();
     } catch (error) {
       onError(error instanceof Error ? error.message : "The export could not be created.");
     }
@@ -1584,7 +1937,7 @@ function ExportsView({
     <section className="page-section">
       <div className="page-heading">
         <div>
-          <span className="small-label">Approved records only</span>
+          <span className="small-label">Verified records only</span>
           <h1>Exports</h1>
           <p>Every exported fact retains its exact quotation and byte range.</p>
         </div>
@@ -1597,8 +1950,19 @@ function ExportsView({
               <strong>{format.label} export</strong>
               <p>{format.description}</p>
             </div>
-            <button onClick={() => void format.action()}>
-              <Download size={16} /> Download
+            <button
+              onClick={() => void format.action()}
+              disabled={disabled}
+            >
+              {disabled ? (
+                <>
+                  <LoaderCircle className="spinner" size={16} /> Record processing
+                </>
+              ) : (
+                <>
+                  <Download size={16} /> Download
+                </>
+              )}
             </button>
           </article>
         ))}
@@ -1636,7 +2000,7 @@ function SettingsView({
           value={localStatus ? "AES-256-GCM local vault" : "Browser-local IndexedDB"}
           detail={
             localStatus
-              ? "Original files, canonical evidence, and review state are encrypted on this workstation."
+              ? `Original files, canonical evidence, and review state are encrypted with a key protected by the signed-in macOS account (${localStatus.username ?? "local user"}).`
               : "Source bytes and canonical artifacts never leave this device."
           }
         />
@@ -1662,8 +2026,8 @@ function SettingsView({
           value={localStatus ? `Local ${localStatus.model.model}` : "Deterministic local retrieval"}
           detail={
             localStatus
-              ? "The loopback-only model selects approved fact IDs; deterministic code verifies citations before display."
-              : "Only approved facts with verified citations can be returned."
+              ? "The loopback-only model selects consensus-reviewed fact IDs; deterministic code verifies citations before display."
+              : "Only verified facts with exact citations can be returned."
           }
         />
         {localStatus?.audit ? (
@@ -1762,6 +2126,10 @@ function EvidenceInspector({
   const [verification, setVerification] = useState<"checking" | "verified" | "failed">(
     "checking"
   );
+  const page = document?.pages.find(
+    (item) => item.pageNumber === citation.pageNumber
+  );
+  const context = document ? citationContext(citation, document) : null;
   useEffect(() => {
     let active = true;
     void verifyCitation(citation, document ?? undefined).then((result) => {
@@ -1784,7 +2152,14 @@ function EvidenceInspector({
           <PanelRightClose size={19} />
         </button>
       </div>
-      <div className="inspector-quote">“{citation.exactQuote}”</div>
+      <div className="inspector-context">
+        <span className="small-label">Surrounding source context</span>
+        <p>
+          {context?.before ? `…${context.before}` : ""}
+          <mark>{context?.exactQuote ?? citation.exactQuote}</mark>
+          {context?.after ? `${context.after}…` : ""}
+        </p>
+      </div>
       {onOpenOriginal ? (
         <button className="secondary-button inspector-source-button" onClick={() => void onOpenOriginal()}>
           <FileText size={16} /> Download original source
@@ -1804,12 +2179,38 @@ function EvidenceInspector({
         label="UTF-8 byte range"
         value={`${citation.canonicalByteStart}–${citation.canonicalByteEnd} (${citation.canonicalByteEnd - citation.canonicalByteStart} bytes)`}
       />
+      <InspectorField
+        label="Document location"
+        value={
+          citation.pageNumber
+            ? `Page ${citation.pageNumber} of ${document?.pageCount ?? "unknown"}`
+            : "Structural text span"
+        }
+        supporting={citation.structuralPath ?? undefined}
+      />
+      {page ? (
+        <InspectorField
+          label="Text source"
+          value={
+            page.extractionMethod === "ocr"
+              ? "Bundled local OCR"
+              : "Native document text"
+          }
+          supporting={
+            page.ocrConfidence === null
+              ? undefined
+              : `OCR confidence ${page.ocrConfidence.toFixed(1)}%${
+                  page.imageSha256 ? ` · page image ${shortHash(page.imageSha256)}` : ""
+                }`
+          }
+        />
+      ) : null}
       <InspectorField label="Parser version" value={citation.parserVersion} />
       <InspectorField
-        label="Reviewer"
-        value={fact?.reviewer ?? "Pending human review"}
+        label="Verification decision"
+        value={fact?.reviewer ?? "Not yet verified"}
         supporting={
-          fact?.reviewedAt ? `Reviewed ${formatDate(fact.reviewedAt)}` : undefined
+          fact?.reviewedAt ? `Completed ${formatDate(fact.reviewedAt)}` : undefined
         }
       />
       <div className={`verification-box ${verification}`}>
@@ -1830,7 +2231,7 @@ function EvidenceInspector({
           </strong>
           <span>
             {verification === "verified"
-              ? "Exact match to immutable canonical bytes"
+              ? "File hashes, canonical artifact, byte bounds, and exact source text all match"
               : "This claim cannot be represented as verified"}
           </span>
         </div>

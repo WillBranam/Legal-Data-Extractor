@@ -6,6 +6,7 @@ public/ocr
 coverage
 *.log
 .verity-local-data
+.verity-local-data-*
 .verity-local-backups
 .env
 .env.local

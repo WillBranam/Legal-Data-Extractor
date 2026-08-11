@@ -3,6 +3,7 @@ import {
   createCitation,
   locateExactQuote,
   readCanonicalByteRange,
+  readCitationContext,
   sha256Bytes,
   sha256Text,
   utf8ByteLength,
@@ -64,6 +65,16 @@ describe("canonical byte evidence", () => {
       verified: true,
       reason: "verified",
       exactQuote: "A precise source sentence."
+    });
+  });
+
+  it("builds Unicode-safe surrounding citation context", () => {
+    const text = "Earlier context — café. Exact evidence. Later context — résumé.";
+    const range = locateExactQuote(text, "Exact evidence.");
+    expect(readCitationContext(text, range.byteStart, range.byteEnd, 10)).toEqual({
+      before: "t — café. ",
+      exactQuote: "Exact evidence.",
+      after: " Later con"
     });
   });
 
