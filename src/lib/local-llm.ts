@@ -3,11 +3,17 @@ import {
   readCanonicalByteRange,
   readCitationContext
 } from "@/lib/evidence";
+import {
+  isConfiguredLocalModelInstalled,
+  listInstalledModelNames,
+  localModelProvider,
+  structuredChatCompletion,
+  validatedLocalModelName,
+  validatedLocalVisualModelName,
+  visualTranscription
+} from "@/lib/local-model-provider";
 import type { EvidenceDocument, FactRecord, FieldCategory, FieldDefinition, FieldValueType } from "@/lib/types";
 
-const DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434";
-const DEFAULT_MODEL = "qwen3:8b";
-const DEFAULT_VISUAL_MODEL = "qwen3-vl:8b";
 const MODEL_TIMEOUT_MS = 120_000;
 const MAX_DOCUMENT_BYTES = 16 * 1024 * 1024;
 const MAX_PAGES = 500;
@@ -17,14 +23,21 @@ const MAX_FIELDS_PER_CHUNK = 8;
 const MIN_FIELDS_PER_CHUNK = 3;
 const MAX_CHUNK_CHARACTERS = 3_500;
 const MAX_EXTRACTION_DURATION_MS = 4 * 60 * 1000;
-// Measured against qwen3:8b: a fully populated field object costs roughly 190
-// output tokens once every required key and both quote fields are emitted.
-// Budgeting below this truncates the response mid-object and JSON.parse throws.
-const EXTRACTION_TOKENS_PER_FIELD = 220;
-const EXTRACTION_TOKEN_OVERHEAD = 96;
+// Measured against qwen3:8b on both providers: a fully populated field object
+// costs roughly 190 output tokens when the model emits compact JSON. Budgeting
+// below this truncates the response mid-object and JSON.parse throws.
+//
+// The margin here is deliberate. Schema-constrained decoders are free to
+// pretty-print, and oMLX does: the same eight fields cost 760 tokens compact
+// and blew past 1,856 indented. COMPACT_JSON_INSTRUCTION keeps output compact,
+// and this budget absorbs the rest.
+const EXTRACTION_TOKENS_PER_FIELD = 320;
+const EXTRACTION_TOKEN_OVERHEAD = 128;
+const COMPACT_JSON_INSTRUCTION =
+  "Return compact JSON on a single line with no newlines, indentation, or extra whitespace.";
 // A "proposal-NNN" element plus its quotes, comma, and whitespace.
-const REVIEW_TOKENS_PER_ID = 8;
-const REVIEW_TOKEN_OVERHEAD = 48;
+const REVIEW_TOKENS_PER_ID = 12;
+const REVIEW_TOKEN_OVERHEAD = 64;
 const REVIEW_BATCH_SIZE = 40;
 // Share of the extraction deadline held back so both review passes can run even
 // when discovery consumes its whole allowance.
@@ -125,64 +138,16 @@ export class MalformedModelOutputError extends Error {
   }
 }
 
+export { isConfiguredLocalModelInstalled };
+export {
+  localModelProvider,
+  validatedLocalModelEndpoint,
+  validatedLocalModelName,
+  validatedLocalVisualModelName
+} from "@/lib/local-model-provider";
+
 export function localExtractionProposalIdentity(proposal: LocalExtractionProposal): string {
   return `${proposal.canonicalKey}:${proposal.pageNumber}:${proposal.rawValue.normalize("NFKC").trim()}`;
-}
-
-export function validatedLocalModelEndpoint(
-  value = process.env.LOCAL_LLM_BASE_URL ?? DEFAULT_OLLAMA_URL
-): URL {
-  const url = new URL(value);
-  if (
-    url.protocol !== "http:" ||
-    !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)
-  ) {
-    throw new Error("LOCAL_MODEL_MUST_USE_LOOPBACK");
-  }
-  if (url.username || url.password || url.search || url.hash) {
-    throw new Error("INVALID_LOCAL_MODEL_URL");
-  }
-  return url;
-}
-
-export function validatedLocalModelName(
-  value = process.env.LOCAL_LLM_MODEL?.trim() || DEFAULT_MODEL
-): string {
-  if (
-    !/^[a-zA-Z0-9][a-zA-Z0-9._/:+-]{0,127}$/.test(value) ||
-    value.includes("://") ||
-    value.toLowerCase().includes("cloud")
-  ) {
-    throw new Error("LOCAL_MODEL_NAME_REQUIRED");
-  }
-  return value;
-}
-
-export function validatedLocalVisualModelName(value = process.env.LOCAL_VISION_MODEL?.trim() || DEFAULT_VISUAL_MODEL): string {
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9._/:+-]{0,127}$/.test(value) || value.includes("://") || value.toLowerCase().includes("cloud")) throw new Error("LOCAL_VISUAL_MODEL_NAME_REQUIRED");
-  return value;
-}
-
-export function isConfiguredLocalModelInstalled(
-  models: Array<{ name?: string; model?: string }>,
-  configuredModel: string
-): boolean {
-  // Ollama reports quantization suffixes on some pulls (qwen3:8b-q4_K_M), and a
-  // bare name defaults to :latest. Exact string equality disabled the whole app
-  // for those installs, so match on the base name and tag prefix as well.
-  const normalize = (value: string): string => {
-    const [name, tag = "latest"] = value.trim().split(":");
-    return `${name}:${tag}`;
-  };
-  const configured = normalize(configuredModel);
-  const [configuredName, configuredTag] = configured.split(":");
-  return models.some((candidate) => {
-    const installed = candidate.name ?? candidate.model;
-    if (!installed) return false;
-    const [installedName, installedTag] = normalize(installed).split(":");
-    if (installedName !== configuredName) return false;
-    return installedTag === configuredTag || installedTag.startsWith(`${configuredTag}-`);
-  });
 }
 
 export function consensusApprovedProposalIds(
@@ -307,27 +272,8 @@ export function normalizeModelEventDate(value: string | null): string | null {
     : value;
 }
 
-async function ollamaFetch(
-  pathname: string,
-  init?: RequestInit,
-  timeoutMs = MODEL_TIMEOUT_MS
-): Promise<Response> {
-  const url = validatedLocalModelEndpoint();
-  url.pathname = pathname;
-  return fetch(url, {
-    ...init,
-    redirect: "error",
-    cache: "no-store",
-    signal: AbortSignal.timeout(Math.max(1, Math.min(MODEL_TIMEOUT_MS, timeoutMs))),
-    headers: {
-      "Content-Type": "application/json",
-      ...(init?.headers ?? {})
-    }
-  });
-}
-
 export async function localModelStatus(): Promise<{
-  provider: "ollama";
+  provider: "ollama" | "openai";
   model: string;
   reachable: boolean;
   installed: boolean;
@@ -335,28 +281,23 @@ export async function localModelStatus(): Promise<{
   visualInstalled: boolean;
   boundary: "loopback-only";
 }> {
+  const provider = localModelProvider();
   const model = validatedLocalModelName();
   const visualModel = validatedLocalVisualModelName();
   try {
-    const response = await ollamaFetch("/api/tags");
-    if (!response.ok) throw new Error("LOCAL_MODEL_UNAVAILABLE");
-    const body = (await response.json()) as {
-      models?: Array<{ name?: string; model?: string }>;
-    };
-    const installed = isConfiguredLocalModelInstalled(body.models ?? [], model);
-    const visualInstalled = isConfiguredLocalModelInstalled(body.models ?? [], visualModel);
+    const installedNames = await listInstalledModelNames();
     return {
-      provider: "ollama",
+      provider,
       model,
       reachable: true,
-      installed,
+      installed: isConfiguredLocalModelInstalled(installedNames, model),
       visualModel,
-      visualInstalled,
+      visualInstalled: isConfiguredLocalModelInstalled(installedNames, visualModel),
       boundary: "loopback-only"
     };
   } catch {
     return {
-      provider: "ollama",
+      provider,
       model,
       reachable: false,
       installed: false,
@@ -367,17 +308,22 @@ export async function localModelStatus(): Promise<{
   }
 }
 
-export async function transcribeWithLocalVisualModel(imageBase64: string): Promise<{ text: string; confidence: number; engine: "qwen3-vl" }> {
-  const response = await ollamaFetch("/api/generate", { method: "POST", body: JSON.stringify({ model: validatedLocalVisualModelName(), stream: false, think: false, prompt: "Transcribe every visible word, number, checkbox state, handwritten entry, initial, and signature-label text on this legal form. Preserve line breaks and exact characters. Do not summarize, interpret, or add missing text. Return transcription only. /no_think", images: [imageBase64], options: { temperature: 0, num_predict: 8192 } }) });
-  if (!response.ok) throw new Error(`LOCAL_VISUAL_MODEL_HTTP_${response.status}`);
-  const body = await response.json() as { response?: string }; if (!body.response?.trim()) throw new Error("LOCAL_VISUAL_MODEL_EMPTY_RESPONSE");
-  return { text: body.response.trim(), confidence: 0.75, engine: "qwen3-vl" };
+export async function transcribeWithLocalVisualModel(
+  imageBase64: string
+): Promise<{ text: string; confidence: number; engine: "qwen3-vl" }> {
+  const text = await visualTranscription(
+    imageBase64,
+    "Transcribe every visible word, number, checkbox state, handwritten entry, initial, and signature-label text on this legal form. Preserve line breaks and exact characters. Do not summarize, interpret, or add missing text. Return transcription only.",
+    8192
+  );
+  return { text, confidence: 0.75, engine: "qwen3-vl" };
 }
 
 async function structuredChat<T>(input: {
   system: string;
   user: string;
   format: object;
+  schemaName?: string;
   parse: (value: unknown) => T;
   deadline?: number;
   maxTokens?: number;
@@ -386,38 +332,21 @@ async function structuredChat<T>(input: {
     ? input.deadline - Date.now()
     : MODEL_TIMEOUT_MS;
   if (remaining <= 0) throw new Error("LOCAL_MODEL_DEADLINE_EXCEEDED");
-  const response = await ollamaFetch("/api/chat", {
-    method: "POST",
-    body: JSON.stringify({
-      model: validatedLocalModelName(),
-      stream: false,
-      think: false,
-      format: input.format,
-      options: {
-        temperature: 0,
-        num_predict: input.maxTokens ?? 512
-      },
-      messages: [
-        { role: "system", content: `${input.system}\n\n/no_think` },
-        { role: "user", content: `${input.user}\n\n/no_think` }
-      ]
-    })
-  }, remaining);
-  if (response.status === 404) throw new Error("LOCAL_MODEL_HTTP_404");
-  if (!response.ok) throw new Error(`LOCAL_MODEL_HTTP_${response.status}`);
-  const body = (await response.json()) as {
-    message?: { content?: string };
-    done_reason?: string;
-  };
-  const content = body.message?.content;
-  if (!content) throw new Error("LOCAL_MODEL_EMPTY_RESPONSE");
-  // Ollama reports done_reason "length" when num_predict was exhausted. The
-  // content is then a valid prefix of the intended JSON, not valid JSON, so it
-  // must be classified before parsing rather than surfacing as a SyntaxError.
-  if (body.done_reason === "length") throw new TruncatedModelOutputError(content);
+  const completion = await structuredChatCompletion({
+    system: `${input.system} ${COMPACT_JSON_INSTRUCTION}`,
+    user: input.user,
+    schema: input.format,
+    schemaName: input.schemaName ?? "structured_output",
+    maxTokens: input.maxTokens ?? 512,
+    timeoutMs: remaining
+  });
+  // A budget-exhausted response is a valid prefix of the intended JSON, not
+  // valid JSON. It must be classified before parsing so it can be recovered
+  // rather than surfacing as a SyntaxError.
+  if (completion.truncated) throw new TruncatedModelOutputError(completion.content);
   let parsed: unknown;
   try {
-    parsed = JSON.parse(content);
+    parsed = JSON.parse(completion.content);
   } catch {
     throw new MalformedModelOutputError();
   }

@@ -30,7 +30,92 @@ For end-user setup and compliance boundaries, see `LOCAL_RUNBOOK.md` and
 - Files can now be added by drag-and-drop and by paste as well as the picker.
   Previously neither existed, and a dragged file navigated away from the app.
 - The next implementation priority is throughput and durability, not the model
-  boundary. See `## Production readiness`.
+  boundary. See `## Local model providers (Ollama and oMLX)
+
+The appliance supports two loopback model hosts, selected by
+`LOCAL_LLM_PROVIDER`. All transport lives in `src/lib/local-model-provider.ts`;
+extraction, review, and citation logic are identical on both.
+
+| | `ollama` (default) | `openai` (oMLX) |
+| --- | --- | --- |
+| Base URL | `http://127.0.0.1:11434` | `http://127.0.0.1:8000` |
+| List models | `/api/tags` → `models[].name` | `/v1/models` → `data[].id` |
+| Chat | `/api/chat` | `/v1/chat/completions` |
+| Auth | none | `Authorization: Bearer $LOCAL_LLM_API_KEY` |
+| Output cap | `options.num_predict` | `max_tokens` |
+| Schema | `format` | `response_format.json_schema` |
+| Truncation | `done_reason: "length"` | `choices[0].finish_reason: "length"` |
+| Vision | `/api/generate` + `images` | content parts + `image_url` data URI |
+
+Model identifiers differ. Ollama uses `name:tag`; oMLX uses the **directory
+basename** under its model dir, so `mlx-community/Qwen3-8B-4bit` on disk is
+served as `Qwen3-8B-4bit`. `isConfiguredLocalModelInstalled` normalizes vendor
+prefixes and quantization suffixes so either form resolves.
+
+### oMLX configuration
+
+```bash
+LOCAL_LLM_PROVIDER=openai
+LOCAL_LLM_BASE_URL=http://127.0.0.1:8000
+LOCAL_LLM_MODEL=Qwen3-8B-4bit
+LOCAL_VISION_MODEL=Qwen3-VL-8B-Instruct-4bit
+LOCAL_LLM_API_KEY=<from ~/.omlx/settings.json auth.api_key>
+```
+
+MLX cannot load Ollama's GGUF weights. Install MLX builds into
+`~/.omlx/models/`, then `omlx restart` — the server only rescans its model
+directory on start, so a newly downloaded model reports as "not installed"
+until it does.
+
+### Pretty-printed JSON inflates the output budget
+
+Schema-constrained decoders may indent their output, and oMLX does. The same
+eight fields cost **760 tokens compact and exceeded 1,856 indented**, which
+truncated the response inside the first field object — leaving salvage nothing
+complete to recover and the document with zero extracted values.
+
+Two mitigations are in place and both must stay:
+
+- `COMPACT_JSON_INSTRUCTION` is appended to every structured prompt.
+- `EXTRACTION_TOKENS_PER_FIELD` is 320 and `REVIEW_TOKENS_PER_ID` is 12, well
+  above the compact-output measurement, to absorb formatting variance.
+
+If a provider is ever added, re-measure both before trusting extraction.
+
+### Verifying a provider
+
+```bash
+# Does the server support schema-constrained decoding and a length stop reason?
+OMLX_MODEL=Qwen3-8B-4bit node scripts/check-omlx-compatibility.mjs
+
+# Does the real extraction path work end to end against it?
+npx tsx scripts/smoke-local-extraction.mjs
+
+# Full readiness, including both models and OCR assets
+npm run local:check
+```
+
+`check-omlx-compatibility.mjs` is the gate. It fails loudly if the server does
+not enforce the JSON Schema or does not report `finish_reason: "length"`,
+because the truncation recovery in `local-llm.ts` depends on both.
+
+### oMLX settings to tighten before real case data
+
+`~/.omlx/settings.json` ships with `server.cors_origins: ["*"]` and
+`server.server_aliases` containing LAN addresses and `.local` hostnames. Both
+contradict the loopback-only boundary this appliance requires. Restrict origins
+to the application origin and aliases to loopback before processing PHI.
+`distributed_inference_enabled` must remain `false`.
+
+### Turbopack and out-of-root symlinks
+
+`npm run local:build` fails with `Symlink ... points out of the filesystem root`
+if a Python virtualenv sits inside the repository, because its `bin/python`
+resolves into Homebrew. Keep the PaddleOCR venv outside the project — the
+runtime path under `~/.verity-caseworks/runtime/` is correct — and the build
+succeeds.
+
+## Production readiness`.
 
 ## Know which server you are testing
 

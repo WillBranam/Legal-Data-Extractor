@@ -113,9 +113,34 @@ memory may set `LOCAL_LLM_MODEL=qwen3:4b`, but should expect lower recall and
 must validate it against representative intake forms, cover sheets, service
 documents, notices, agreements, and identifiers.
 
+### Alternative model host: oMLX
+
+The appliance can run against Ollama (default) or any OpenAI-compatible
+loopback server. oMLX is supported and measured about 30% faster on Apple
+Silicon. MLX cannot load Ollama's GGUF weights, so install MLX builds:
+
+- text: `mlx-community/Qwen3-8B-4bit`
+- vision: `mlx-community/Qwen3-VL-8B-Instruct-4bit`
+
+Place them under `~/.omlx/models/`, run `omlx restart` so the server rescans,
+then set in `.env.local`:
+
+```text
+LOCAL_LLM_PROVIDER=openai
+LOCAL_LLM_BASE_URL=http://127.0.0.1:8000
+LOCAL_LLM_MODEL=Qwen3-8B-4bit
+LOCAL_VISION_MODEL=Qwen3-VL-8B-Instruct-4bit
+LOCAL_LLM_API_KEY=<oMLX API key>
+```
+
+Model names are the **directory basename**, not the Hugging Face path. Verify
+with `node scripts/check-omlx-compatibility.mjs` and `npm run local:check`
+before use, and tighten oMLX's `cors_origins` and `server_aliases` to loopback
+first. See the [provider notes](docs/INGESTION_DEBUGGING_HANDOFF.md).
+
 ### 2. Start the local model
 
-In the first terminal:
+With the Ollama profile, in the first terminal:
 
 ```bash
 cd Legal-Data-Extractor

@@ -323,8 +323,11 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
   // Files can arrive three ways. Only the picker existed before, which meant a
   // dragged file triggered the browser default and navigated away from the
   // workspace, and a pasted file did nothing at all.
+  // Paste is a window listener, so it needs the latest importFiles without
+  // re-subscribing on every render. Drag and drop are JSX handlers and close
+  // over the current render directly.
   const importFilesRef = useRef(importFiles);
-  importFilesRef.current = importFiles;
+  useEffect(() => { importFilesRef.current = importFiles; });
 
   useEffect(() => {
     function onPaste(event: ClipboardEvent): void {
@@ -355,7 +358,7 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
     if (!Array.from(event.dataTransfer.types).includes("Files")) return;
     event.preventDefault();
     setDragging(false);
-    void importFilesRef.current(Array.from(event.dataTransfer.files));
+    void importFiles(Array.from(event.dataTransfer.files));
   }
 
   async function retryDocumentExtraction(documentId: string): Promise<void> {

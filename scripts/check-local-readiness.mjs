@@ -11,17 +11,24 @@ try {
 
 const minimumNode = [20, 18, 0];
 const currentNode = process.versions.node.split(".").map(Number);
-const model = process.env.LOCAL_LLM_MODEL?.trim() || "qwen3:8b";
-const visualModel = process.env.LOCAL_VISION_MODEL?.trim() || "qwen3-vl:8b";
+const provider = (process.env.LOCAL_LLM_PROVIDER?.trim().toLowerCase() || "ollama");
+const defaultEndpoint = provider === "openai" ? "http://127.0.0.1:8000" : "http://127.0.0.1:11434";
+const model = process.env.LOCAL_LLM_MODEL?.trim() || (provider === "openai" ? "Qwen3-8B-4bit" : "qwen3:8b");
+const visualModel = process.env.LOCAL_VISION_MODEL?.trim() || (provider === "openai" ? "Qwen3-VL-8B-Instruct-4bit" : "qwen3-vl:8b");
+const apiKey = process.env.LOCAL_LLM_API_KEY?.trim() || "";
 const failures = [];
 const passes = [];
 let endpoint;
 try {
   endpoint = new URL(
-    process.env.LOCAL_LLM_BASE_URL || "http://127.0.0.1:11434"
+    process.env.LOCAL_LLM_BASE_URL || defaultEndpoint
   );
 } catch {
   failures.push("LOCAL_LLM_BASE_URL must be a valid URL");
+}
+
+if (provider !== "ollama" && provider !== "openai") {
+  failures.push('LOCAL_LLM_PROVIDER must be "ollama" or "openai"');
 }
 
 if (
@@ -63,22 +70,51 @@ if (validEndpoint) {
   failures.push("LOCAL_LLM_BASE_URL must use an HTTP loopback address");
 }
 
+// Model identifiers are normalized the same way the application does, so a
+// quantization suffix or vendor prefix does not read as "not installed".
+function normalizeModelName(value) {
+  const withoutVendor = value.includes("/") ? value.slice(value.lastIndexOf("/") + 1) : value;
+  const [name, tag = "latest"] = withoutVendor.trim().split(":");
+  return { name, tag };
+}
+
+function modelInstalled(installedNames, configured) {
+  const target = normalizeModelName(configured);
+  return installedNames.some((installed) => {
+    const candidate = normalizeModelName(installed);
+    return candidate.name === target.name
+      && (candidate.tag === target.tag || candidate.tag.startsWith(`${target.tag}-`));
+  });
+}
+
 if (validEndpoint) {
+  const label = provider === "openai" ? "Local OpenAI-compatible server" : "Ollama";
   try {
-    const response = await fetch(new URL("/api/tags", endpoint), {
-      cache: "no-store",
-      redirect: "error",
-      signal: AbortSignal.timeout(5000)
-    });
-    const body = await response.json();
-    const installedModels = (body.models || []).map((candidate) => candidate.name || candidate.model);
-    const installed = installedModels.includes(model);
-    if (installed) passes.push(`Ollama model ${model}`);
-    else failures.push(`Ollama is reachable but model ${model} is not installed`);
-    if (installedModels.includes(visualModel)) passes.push(`Ollama visual model ${visualModel}`);
-    else failures.push(`Ollama is reachable but visual model ${visualModel} is not installed`);
+    const response = await fetch(
+      new URL(provider === "openai" ? "/v1/models" : "/api/tags", endpoint),
+      {
+        cache: "no-store",
+        redirect: "error",
+        headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+        signal: AbortSignal.timeout(5000)
+      }
+    );
+    if (response.status === 401 || response.status === 403) {
+      failures.push(`${label} rejected the API key; set LOCAL_LLM_API_KEY`);
+    } else if (!response.ok) {
+      failures.push(`${label} returned HTTP ${response.status} when listing models`);
+    } else {
+      const body = await response.json();
+      const installedNames = provider === "openai"
+        ? (body.data || []).map((candidate) => candidate.id).filter(Boolean)
+        : (body.models || []).map((candidate) => candidate.name || candidate.model).filter(Boolean);
+      if (modelInstalled(installedNames, model)) passes.push(`${label} text model ${model}`);
+      else failures.push(`${label} is reachable but text model ${model} is not installed`);
+      if (modelInstalled(installedNames, visualModel)) passes.push(`${label} visual model ${visualModel}`);
+      else failures.push(`${label} is reachable but visual model ${visualModel} is not installed`);
+    }
   } catch {
-    failures.push("Ollama is not reachable on the configured loopback endpoint");
+    failures.push(`${label} is not reachable on the configured loopback endpoint`);
   }
 }
 

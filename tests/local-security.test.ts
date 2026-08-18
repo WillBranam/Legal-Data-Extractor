@@ -7,9 +7,12 @@ import {
   looksLikePromptInjection,
   normalizeModelEventDate,
   rankSelectedFactIds,
+  salvageTruncatedArrayItems,
   validatedLocalModelEndpoint,
-  validatedLocalModelName
+  validatedLocalModelName,
+  validatedLocalVisualModelName
 } from "@/lib/local-llm";
+import { localModelProvider } from "@/lib/local-model-provider";
 import { createEmptyWorkspace } from "@/lib/workspace";
 import { auditRestorePointApproved } from "@/lib/local-vault";
 
@@ -39,10 +42,57 @@ describe("offline security boundaries", () => {
     );
   });
 
-  it("requires the exact configured Ollama model tag", () => {
-    const models = [{ name: "qwen3:4b", model: "qwen3:4b" }];
-    expect(isConfiguredLocalModelInstalled(models, "qwen3:4b")).toBe(true);
-    expect(isConfiguredLocalModelInstalled(models, "qwen3:8b")).toBe(false);
+  it("matches the configured model across providers without matching a different model", () => {
+    const ollama = [{ name: "qwen3:4b", model: "qwen3:4b" }];
+    expect(isConfiguredLocalModelInstalled(ollama, "qwen3:4b")).toBe(true);
+    expect(isConfiguredLocalModelInstalled(ollama, "qwen3:8b")).toBe(false);
+
+    // A quantization suffix on the installed tag still satisfies the base tag.
+    expect(
+      isConfiguredLocalModelInstalled([{ name: "qwen3:8b-q4_K_M" }], "qwen3:8b")
+    ).toBe(true);
+
+    // OpenAI-compatible servers report `id`, and oMLX drops the vendor prefix.
+    const omlx = [{ id: "Qwen3-8B-4bit" }];
+    expect(isConfiguredLocalModelInstalled(omlx, "Qwen3-8B-4bit")).toBe(true);
+    expect(isConfiguredLocalModelInstalled(omlx, "mlx-community/Qwen3-8B-4bit")).toBe(true);
+    expect(isConfiguredLocalModelInstalled(omlx, "Qwen3-14B-4bit")).toBe(false);
+  });
+
+  it("keeps both providers on a loopback interface", () => {
+    expect(localModelProvider("ollama")).toBe("ollama");
+    expect(localModelProvider("openai")).toBe("openai");
+    expect(() => localModelProvider("anthropic")).toThrow("LOCAL_MODEL_PROVIDER_INVALID");
+    // The oMLX default port is still subject to the loopback rule.
+    expect(validatedLocalModelEndpoint("http://127.0.0.1:8000").origin).toBe("http://127.0.0.1:8000");
+    expect(() => validatedLocalModelEndpoint("http://192.168.1.173:8000")).toThrow(
+      "LOCAL_MODEL_MUST_USE_LOOPBACK"
+    );
+  });
+
+  it("accepts MLX model identifiers but still rejects cloud routing", () => {
+    expect(validatedLocalModelName("Qwen3-8B-4bit")).toBe("Qwen3-8B-4bit");
+    expect(validatedLocalModelName("mlx-community/Qwen3-8B-4bit")).toBe("mlx-community/Qwen3-8B-4bit");
+    expect(validatedLocalVisualModelName("Qwen3-VL-8B-Instruct-4bit")).toBe("Qwen3-VL-8B-Instruct-4bit");
+    expect(() => validatedLocalModelName("some-cloud-model")).toThrow("LOCAL_MODEL_NAME_REQUIRED");
+  });
+
+  it("salvages complete elements from truncated model output", () => {
+    // A response cut off mid-object: two complete fields, one partial.
+    const partial = '{"document_type":"Cover Sheet","fields":[{"raw_value":"A"},{"raw_value":"B"},{"raw_val';
+    expect(salvageTruncatedArrayItems(partial, "fields")).toEqual([
+      { raw_value: "A" },
+      { raw_value: "B" }
+    ]);
+
+    // A truncated approval list keeps every ID it finished naming.
+    const ids = '{"approved_ids":["proposal-0","proposal-1","proposal-';
+    expect(salvageTruncatedArrayItems(ids, "approved_ids")).toEqual([
+      "proposal-0",
+      "proposal-1"
+    ]);
+
+    expect(salvageTruncatedArrayItems('{"other":[]}', "fields")).toEqual([]);
   });
 
   it("accepts only an exact Keychain-approved audit restore head", () => {
