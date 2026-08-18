@@ -1,14 +1,13 @@
 "use client";
 
-import type { EvidenceDocument, FactRecord } from "@/lib/types";
+import type { EvidenceDocument, FactRecord, FieldDefinition, InformationQueryAnswer } from "@/lib/types";
 import type { LocalExtractionResult } from "@/lib/local-llm";
 
 export interface LocalRuntimeStatus {
   enabled: boolean;
   configured: boolean;
-  authenticated: boolean;
   username: string | null;
-  accessMode: "macos-keychain" | "legacy-password";
+  legacyVaultArchived: boolean;
   storage: "encrypted-local-vault";
   networkBoundary: "loopback-only";
   audit: {
@@ -20,8 +19,35 @@ export interface LocalRuntimeStatus {
     model: string;
     reachable: boolean;
     installed: boolean;
+    visualModel: string;
+    visualInstalled: boolean;
     boundary: "loopback-only";
   };
+}
+
+export interface LocalExportFile {
+  id: string;
+  path: string;
+  size: number;
+  sha256: string;
+  contentType: string;
+}
+
+export interface LocalExportJob {
+  id: string;
+  matterId: string;
+  status: "queued" | "running" | "ready" | "failed";
+  phase: "queued" | "snapshot" | "sqlite" | "xlsx" | "docx" | "pdf" | "evidence" | "verify" | "hash" | "ready";
+  progress: number;
+  message: string;
+  error: string | null;
+  createdAt: string;
+  completedAt: string | null;
+  expiresAt: string;
+  packageName: string | null;
+  packageFileId: string | null;
+  files: LocalExportFile[];
+  verification: { verified: boolean; checkedAt: string; failures: string[] } | null;
 }
 
 async function localRequest<T>(url: string, init?: RequestInit): Promise<T> {
@@ -53,30 +79,6 @@ function downloadBlob(blob: Blob, filename: string): void {
 
 export function getLocalRuntimeStatus(): Promise<LocalRuntimeStatus> {
   return localRequest<LocalRuntimeStatus>("/api/local/status");
-}
-
-export async function setupLocalRuntime(input: {
-  username: string;
-  password: string;
-}): Promise<void> {
-  await localRequest("/api/local/setup", {
-    method: "POST",
-    body: JSON.stringify(input)
-  });
-}
-
-export async function loginLocalRuntime(input: {
-  username: string;
-  password: string;
-}): Promise<void> {
-  await localRequest("/api/local/session", {
-    method: "POST",
-    body: JSON.stringify(input)
-  });
-}
-
-export async function logoutLocalRuntime(): Promise<void> {
-  await localRequest("/api/local/session", { method: "DELETE" });
 }
 
 export async function storeOriginalFile(documentId: string, file: File): Promise<void> {
@@ -122,9 +124,10 @@ export async function downloadOriginalFile(
 }
 
 export async function extractDocumentWithLocalModel(
-  document: EvidenceDocument
+  document: EvidenceDocument,
+  fieldDefinitions: FieldDefinition[] = []
 ): Promise<LocalExtractionResult> {
-  const body = JSON.stringify({ document });
+  const body = JSON.stringify({ document, fieldDefinitions });
   if (new TextEncoder().encode(body).byteLength > 20 * 1024 * 1024) {
     throw new Error("EXTRACTION_REQUEST_TOO_LARGE");
   }
@@ -147,6 +150,24 @@ export async function selectFactsWithLocalModel(input: {
     body: JSON.stringify(input)
   });
   return result.factIds;
+}
+
+export function queryCaseInformation(matterId: string, question: string): Promise<InformationQueryAnswer> {
+  return localRequest<InformationQueryAnswer>(`/api/local/matters/${encodeURIComponent(matterId)}/query`, {
+    method: "POST",
+    body: JSON.stringify({ question })
+  });
+}
+
+export async function resolveInformationException(matterId: string, occurrenceId: string, decision: "verify" | "withhold"): Promise<void> {
+  await localRequest(`/api/local/matters/${encodeURIComponent(matterId)}/exceptions/${encodeURIComponent(occurrenceId)}/resolve`, {
+    method: "POST",
+    body: JSON.stringify({ decision })
+  });
+}
+
+export async function resolveDocumentException(matterId: string, documentId: string, decision: "attach" | "exclude"): Promise<void> {
+  await localRequest(`/api/local/matters/${encodeURIComponent(matterId)}/exceptions/${encodeURIComponent(documentId)}/document`, { method: "POST", body: JSON.stringify({ decision }) });
 }
 
 export async function recordLocalAuditEvent(input: {
@@ -183,4 +204,45 @@ export async function downloadEncryptedBackup(): Promise<void> {
       .get("content-disposition")
       ?.match(/filename="([^"]+)"/)?.[1] ?? "verity-encrypted-backup.zip";
   downloadBlob(await response.blob(), filename);
+}
+
+export function startCompleteLocalExport(status: "final" | "partial" = "final"): Promise<LocalExportJob> {
+  return localRequest<LocalExportJob>("/api/local/exports", {
+    method: "POST",
+    body: JSON.stringify({
+      status,
+      includeOriginals: true,
+      includeCanonicalArtifacts: true,
+      includePageImages: true,
+      formats: ["sqlite", "docx", "xlsx", "pdf", "csv", "jsonl"],
+      sensitiveDataAcknowledged: true
+    })
+  });
+}
+
+export function getLocalExportJob(exportId: string): Promise<LocalExportJob> {
+  return localRequest<LocalExportJob>(`/api/local/exports/${encodeURIComponent(exportId)}`);
+}
+
+export async function downloadLocalExportFile(
+  exportId: string,
+  file: LocalExportFile
+): Promise<void> {
+  const response = await fetch(
+    `/api/local/exports/${encodeURIComponent(exportId)}/files/${encodeURIComponent(file.id)}`,
+    { credentials: "same-origin", cache: "no-store" }
+  );
+  if (!response.ok) {
+    const body = (await response.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `LOCAL_API_HTTP_${response.status}`);
+  }
+  downloadBlob(await response.blob(), file.path.split("/").at(-1) ?? "verity-export");
+}
+
+export function verifyLocalExport(exportId: string): Promise<{
+  verified: boolean;
+  checkedAt: string;
+  failures: string[];
+}> {
+  return localRequest(`/api/local/exports/${encodeURIComponent(exportId)}/verify`);
 }

@@ -1,12 +1,9 @@
 import { NextResponse } from "next/server";
 import {
-  authenticateLocalSession,
   localOnlyModeEnabled,
   osAccountLocalSession,
   verifyAuditChain
 } from "@/lib/local-vault";
-
-export const LOCAL_SESSION_COOKIE = "verity_local_session";
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 
@@ -71,42 +68,19 @@ export function assertLocalRequest(request: Request, mutation = false): void {
   }
 }
 
-export function readCookie(request: Request, name: string): string | null {
-  const cookie = request.headers.get("cookie");
-  if (!cookie) return null;
-  for (const entry of cookie.split(";")) {
-    const [key, ...value] = entry.trim().split("=");
-    if (key === name) return decodeURIComponent(value.join("="));
-  }
-  return null;
-}
-
 export async function requireLocalSession(request: Request, mutation = false) {
   assertLocalRequest(request, mutation);
-  const session =
-    (await authenticateLocalSession(readCookie(request, LOCAL_SESSION_COOKIE))) ??
-    (await osAccountLocalSession());
-  if (!session) throw new Error("AUTHENTICATION_REQUIRED");
+  const session = await osAccountLocalSession();
   if (mutation && !(await verifyAuditChain(session)).valid) {
     throw new Error("AUDIT_CHAIN_INVALID");
   }
   return session;
 }
 
-export function localSessionCookie(token: string): string {
-  return `${LOCAL_SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=43200`;
-}
-
-export function clearLocalSessionCookie(): string {
-  return `${LOCAL_SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`;
-}
-
 export function localApiError(error: unknown): NextResponse {
   const code = error instanceof Error ? error.message : "LOCAL_API_ERROR";
   const status =
-    code === "AUTHENTICATION_REQUIRED"
-      ? 401
-      : code === "LOCAL_MODE_DISABLED" || code === "LOOPBACK_REQUIRED"
+    code === "LOCAL_MODE_DISABLED" || code === "LOOPBACK_REQUIRED"
         ? 404
         : code === "ORIGIN_MISMATCH"
           ? 403

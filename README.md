@@ -1,9 +1,17 @@
 # Verity Caseworks
 
-Verity Caseworks converts legal case documents into reviewable facts and lets
-users query approved records using natural-language questions. Every displayed
-source quotation is reconstructed from, and verified against, an immutable
-canonical UTF-8 byte range.
+Verity Caseworks digitizes administrative information from legal matter files.
+It extracts names, parties and roles, firms, case and claim numbers, personal
+identifiers, contacts, important dates, signatures, relationships, checkbox
+selections, and any other clearly labeled lookup-worthy field. It preserves the
+exact source value beside a deterministic normalized value, and produces a
+portable case information package for day-to-day legal operations.
+
+The default workflow intentionally excludes testimony, allegations, disputed
+event narratives, damages analysis, and model-authored case summaries. Every
+published value is tied to a quotation reconstructed from an immutable canonical
+UTF-8 byte range. Signature processing reports only that a signature mark was
+detected; it never authenticates a signature.
 
 The application has two intentionally separate operating profiles:
 
@@ -25,9 +33,11 @@ PHI.
 - Individual EML and MSG files
 - JPEG, PNG, and TIFF images
 
-Native PDF text is used when available. Image-only pages are processed with
-bundled Tesseract OCR assets from the application origin—no OCR CDN or external
-OCR service is required.
+Native PDF text is used when available. The preferred offline OCR path is local
+PP-OCRv5. Bundled English/Spanish Tesseract assets provide an immediate fallback,
+and the loopback-only `qwen3-vl:8b` model is used selectively for difficult
+handwriting, irregular forms, checkboxes, and signature-region transcription.
+No OCR CDN or external OCR service is used.
 
 ## Do I need to install the repository locally?
 
@@ -42,7 +52,7 @@ You also need:
 - npm, included with Node.js;
 - Ollama;
 - enough local disk space for the repository, encrypted case vault, OCR assets,
-  and the `qwen3:8b` model.
+  and the `qwen3:8b` and `qwen3-vl:8b` models.
 
 The initial dependency installation and model download require internet access.
 After preparation, the local appliance can run with external networking
@@ -57,6 +67,7 @@ git clone https://github.com/WillBranam/Legal-Data-Extractor.git
 cd Legal-Data-Extractor
 npm ci
 ollama pull qwen3:8b
+ollama pull qwen3-vl:8b
 npm run local:build
 npm run local:prepare-runtime
 npm run local:verify-runtime
@@ -66,18 +77,41 @@ If you already have the repository folder, start with `cd` into that folder and
 run `npm ci`; you do not need to clone it again.
 
 `npm ci` also prepares the self-hosted OCR worker, WebAssembly cores, and
-English language data in `public/ocr`.
+English and Spanish language data in `public/ocr`.
+
+For the preferred PP-OCRv5 path, create a dedicated offline Python environment,
+install PaddleOCR and PaddlePaddle, download the PP-OCRv5 detection and
+recognition model directories while online, then set absolute paths in
+`.env.local`:
+
+```bash
+npm run local:setup
+```
+
+This command performs those steps on an Apple Silicon Mac, installs
+`qwen3-vl:8b`, preserves existing `.env.local` values, runs an OCR smoke test,
+and finishes with the complete readiness check. The resulting settings are:
+
+```text
+PADDLEOCR_PYTHON=/absolute/path/to/paddleocr-venv/bin/python
+PADDLE_OCR_MODEL_DIR=/absolute/path/to/ppocr-models
+LOCAL_VISION_MODEL=qwen3-vl:8b
+```
+
+`PADDLE_OCR_MODEL_DIR` must contain `detection/` and `recognition/`. The
+readiness check fails if either local model, either language asset, or either
+PP-OCRv5 weight directory is missing. Once prepared, the OCR worker runs as a
+one-shot local process and is never bound to a network interface.
 
 `local:prepare-runtime` removes development-only lint, test, and build packages
 after the production build is complete. `local:verify-runtime` audits only the
 installed production dependency boundary. Run `npm ci` again before doing
 development work or rebuilding.
 
-`qwen3:8b` is the release default because it was materially more complete on
-the included fact-sheet, transcript, and damages tests. On the test Mac it was
-about 26% slower than `qwen3:4b` on the difficult three-document subset. Machines
-with limited memory may set `LOCAL_LLM_MODEL=qwen3:4b`, but should expect lower
-recall and validate results against their own representative matters.
+`qwen3:8b` is the structured field-extraction default. Machines with limited
+memory may set `LOCAL_LLM_MODEL=qwen3:4b`, but should expect lower recall and
+must validate it against representative intake forms, cover sheets, service
+documents, notices, agreements, and identifiers.
 
 ### 2. Start the local model
 
@@ -121,27 +155,63 @@ Local-first v1 supports passwordless operation on a single-user, firm-managed
 Mac. The app creates a random vault key in the signed-in user's macOS Keychain;
 it does not display a second application login. The operating-system account is
 the user identity and must be individual, managed, protected by MFA where firm
-policy requires it, and backed by FileVault and automatic screen lock. Earlier
-password vaults still show their legacy unlock screen.
+policy requires it, and backed by FileVault and automatic screen lock. If the
+app finds an earlier password-locked vault, it preserves that entire vault in a
+timestamped `locked-vault` archive beside the active data directory and opens a
+fresh Keychain-protected workspace. It never asks for the old password.
 
-1. Add supported case files.
-2. Wait until extraction, two separate model-review passes, deterministic byte
-   verification, and encrypted save finish. Query and export remain locked.
-3. Inspect the automatic verification register and exact source quotations.
-4. Query the verified record and inspect each exact citation.
-5. Create encrypted backups from Settings and move them to an approved
+1. Add supported case files or one matter folder.
+2. Review or adjust the enabled administrative field registry.
+3. Wait until classification, OCR, extraction, two independent model-review
+   passes, normalization, exact-byte verification, reconciliation, and encrypted
+   save finish. Lookup and export remain locked while this runs.
+4. Resolve only the short **Exceptions** queue. Clear values publish automatically.
+5. Use **Find Information** for administrative lookup and inspect exact citations.
+6. Open **Download Case Package**, acknowledge that the open package may contain
+   full PII/PHI, build it, and download either the
+   complete ZIP or individual SQLite, Word, Excel, or PDF files.
+7. Create encrypted backups from Settings and move them to an approved
    encrypted destination.
-6. Lock or sign out of macOS when finished.
+8. Lock or sign out of macOS when finished.
 
-Local data is stored under `.verity-local-data` in encrypted form. Losing the
+Local data is stored outside the repository under `~/.verity-caseworks/data` in encrypted form. Existing `.verity-local-data` workspaces are copied there on the first local start and are never deleted automatically. Set `LOCAL_DATA_DIRECTORY` to an absolute encrypted location when firm policy requires a managed volume. Losing the
 macOS Keychain item makes that data unrecoverable. Follow the complete
 [local operation runbook](docs/LOCAL_RUNBOOK.md) for backup, restore, legal
 hold, and incident procedures.
 
+## Portable case database and legal documents
+
+The local Export workspace creates every deliverable from one verified snapshot.
+The complete package includes:
+
+- a standard SQLite database with full-text search, typed information views,
+  field-level citations, source hashes, and example SQL;
+- editable table-based Case Information Summary and Document Register DOCX files;
+- matching searchable, printable PDF references;
+- a multi-sheet `Case_Information.xlsx` workbook, data dictionary, and separate
+  exception workbook;
+- CSV and JSONL mirrors of the typed administrative tables;
+- original sources, canonical UTF-8 evidence, provenance metadata, a manifest,
+  and SHA-256 checksums.
+
+The Export screen shows each generation phase and keeps the files unavailable
+until database creation, document rendering, citation verification, parity
+checks, and hashing finish. A final package is blocked while any document is
+still awaiting OCR. An explicitly requested partial package is labeled
+`PARTIAL` throughout its filename and metadata.
+
+These portable exports are intentionally unencrypted so SQLite, Word, Excel,
+and PDF tools can open them directly. They may contain PHI. Save them only to a
+firm-approved encrypted destination, restrict access through the operating
+system or document-management system, and use an approved secure transfer
+method. The encrypted vault backup and the open legal-work-product export serve
+different purposes.
+
 ### Local development
 
-This command explicitly keeps `PHI_MODE=disabled`; use it only with synthetic or
-de-identified data:
+The local development command is loopback-only and enables the protected local
+profile. Use synthetic or de-identified data until the firm has completed the
+readiness checklist and approved the workstation:
 
 ```bash
 npm install
@@ -158,10 +228,11 @@ Open `http://127.0.0.1:3000`.
 
 ## Synthetic acceptance matter
 
-The folder `sample-data/rivera-v-northstar` contains seven fictional evidence
-files, a known-answer ground-truth file, a disputed fact, and a prompt-injection
-fixture. Add only the seven numbered files. See the folder README for the
-acceptance questions and expected results.
+The existing synthetic matter remains useful for parser regression, but its
+narrative fact expectations predate the administrative pivot. New administrative
+benchmarks should focus on cover sheets, intake forms, service records, notices
+of appearance, agreements, identifiers, contacts, dates, checkboxes, and
+signature marks.
 
 To regenerate the fixture, use Python 3.10 or newer and install its generator
 dependencies first:

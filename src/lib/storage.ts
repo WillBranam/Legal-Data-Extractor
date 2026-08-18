@@ -1,5 +1,6 @@
 import { openDB } from "idb";
 import type { WorkspaceState } from "@/lib/types";
+import { migrateWorkspaceToV2 } from "@/lib/workspace";
 
 const DATABASE_NAME = "verity-caseworks-local";
 const STORE_NAME = "workspace";
@@ -20,7 +21,7 @@ async function database() {
 }
 
 function normalizeWorkspace(state: WorkspaceState): WorkspaceState {
-  return {
+  return migrateWorkspaceToV2({
     ...state,
     matter: {
       ...state.matter,
@@ -38,7 +39,7 @@ function normalizeWorkspace(state: WorkspaceState): WorkspaceState {
       ocrMeanConfidence: document.ocrMeanConfidence ?? null
     })),
     reviewDecisions: state.reviewDecisions ?? []
-  };
+  });
 }
 
 export async function loadWorkspace(

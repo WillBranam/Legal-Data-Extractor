@@ -5,14 +5,7 @@ import { fileURLToPath } from "node:url";
 const projectRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const outputRoot = join(projectRoot, "public", "ocr");
 const coreSource = join(projectRoot, "node_modules", "tesseract.js-core");
-const languageSource = join(
-  projectRoot,
-  "node_modules",
-  "@tesseract.js-data",
-  "eng",
-  "4.0.0_best_int",
-  "eng.traineddata.gz"
-);
+const languageSources = ["eng", "spa"].map((language) => ({ language, source: join(projectRoot, "node_modules", "@tesseract.js-data", language, "4.0.0_best_int", `${language}.traineddata.gz`) }));
 
 await rm(outputRoot, { recursive: true, force: true });
 await mkdir(join(outputRoot, "core"), { recursive: true });
@@ -22,7 +15,7 @@ await copyFile(
   join(projectRoot, "node_modules", "tesseract.js", "dist", "worker.min.js"),
   join(outputRoot, "worker.min.js")
 );
-await copyFile(languageSource, join(outputRoot, "lang", "eng.traineddata.gz"));
+await Promise.all(languageSources.map(({ language, source }) => copyFile(source, join(outputRoot, "lang", `${language}.traineddata.gz`))));
 await copyFile(
   join(projectRoot, "node_modules", "pdfjs-dist", "legacy", "build", "pdf.worker.min.mjs"),
   join(outputRoot, "pdf.worker.min.mjs")
@@ -38,5 +31,5 @@ await Promise.all(
 );
 
 console.log(
-  `Prepared self-hosted OCR/PDF assets: ${coreFiles.length + 3} files in public/ocr`
+  `Prepared self-hosted English/Spanish OCR and PDF assets: ${coreFiles.length + 4} files in public/ocr`
 );

@@ -17,7 +17,7 @@ flowchart LR
     User["Signed-in macOS user"] --> Browser["Browser UI on 127.0.0.1"]
     Keychain["macOS Keychain"] --> LocalAPI
     Browser --> LocalAPI["Same-origin Next.js local API"]
-    Browser --> OCR["Bundled browser OCR"]
+    Browser --> OCR["PP-OCRv5, bilingual Tesseract, selective Qwen3-VL"]
 
     LocalAPI --> Vault["AES-256-GCM local vault"]
     Vault --> Originals["Encrypted original documents"]
@@ -25,7 +25,7 @@ flowchart LR
     LocalAPI --> Audit["HMAC hash-chained audit log"]
     LocalAPI --> Ollama["Ollama on loopback"]
 
-    Ollama --> Extract["Structured fact candidates"]
+    Ollama --> Extract["Typed administrative field candidates"]
     Extract --> Verify["Exact quote and UTF-8 byte verification"]
     Verify --> Consensus["Separate model-review passes"]
     Consensus --> Query["Verified-source query"]
@@ -87,19 +87,25 @@ The firm must supply the controls that an application cannot:
 
 1. The reviewer selects a file in the browser.
 2. The browser enforces batch and file limits and parses the file locally.
-3. Bundled OCR processes image-only pages locally.
-4. The original file is encrypted into `.verity-local-data/originals`.
+3. Local PP-OCRv5 processes image-only pages first; bilingual bundled Tesseract and selective Qwen3-VL provide bounded fallbacks.
+4. The original file is encrypted into `~/.verity-caseworks/data/originals` (or the configured absolute local-data directory), outside the repository and production build tree.
 5. Canonical text, hashes, page provenance, and OCR provenance are created.
 6. Canonical page text is sent only to loopback Ollama.
 7. Model-returned quotations are matched to exact canonical UTF-8 bytes.
 8. Two separate review passes must agree on each proposed source span.
 9. Application code rehydrates the exact quotation; model-authored summaries
    are not promoted as authoritative claims.
-10. The query model may select verified fact IDs; application code verifies
+10. Restricted lookup selects verified typed occurrence IDs; application code verifies
     every citation before display.
-11. Exports contain approved, source-linked records and are recorded in the
+11. Exports are built from a single transactionally consistent verified
+    snapshot. SQLite, DOCX, XLSX, PDF, CSV, and JSONL outputs share stable record
+    and citation IDs; the package includes originals, canonical artifacts,
+    provenance, a manifest, and SHA-256 checksums. Final export is unavailable
+    while a document still awaits OCR. Open exports must be written only to an
+    encrypted, access-controlled destination.
+12. Export creation and downloads are recorded in the
     local audit log.
-12. Matter deletion is blocked by an active legal hold.
+13. Matter deletion is blocked by an active legal hold.
 
 ## Deployment profiles
 

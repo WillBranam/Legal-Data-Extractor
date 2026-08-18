@@ -37,7 +37,7 @@ export async function PUT(request: Request) {
   try {
     const session = await requireLocalSession(request, true);
     const { workspace, revision, releaseLegalHold } = workspaceEnvelopeSchema.parse(
-      await readBoundedJson(request, 64 * 1024 * 1024, "WORKSPACE_TOO_LARGE")
+      await readBoundedJson(request, 256 * 1024 * 1024, "WORKSPACE_TOO_LARGE")
     );
     const nextRevision = await writeLocalWorkspace(
       session,

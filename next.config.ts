@@ -26,8 +26,16 @@ const securityHeaders = [
 const nextConfig: NextConfig = {
   poweredByHeader: false,
   productionBrowserSourceMaps: false,
-  turbopack: {
-    root: process.cwd()
+  turbopack: { root: import.meta.dirname },
+  serverExternalPackages: ["exceljs", "pdfkit"],
+  outputFileTracingExcludes: {
+    "/*": [
+      ".verity-local-data/**",
+      ".verity-local-data-*/**",
+      ".verity-caseworks/**",
+      ".env*",
+      "sample-data/**"
+    ]
   },
   async headers() {
     return [{ source: "/(.*)", headers: securityHeaders }];

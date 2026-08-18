@@ -4,10 +4,14 @@
 node_modules
 public/ocr
 coverage
+*.tsbuildinfo
 *.log
 .verity-local-data
 .verity-local-data-*
+.verity-caseworks
 .verity-local-backups
+paddleocr-venv/
+
 .env
 .env.local
 .env.*.local

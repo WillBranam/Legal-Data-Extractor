@@ -1,5 +1,10 @@
 # Local-First v1 Acceptance Report
 
+> Historical note: this report evaluates the retired v1 narrative-fact workflow.
+> Schema v2 now targets administrative case information and requires a new
+> benchmark of cover sheets, intake forms, service records, notices, agreements,
+> identifiers, contacts, dates, checkboxes, handwriting, and signature marks.
+
 Date: August 10, 2026  
 Test matter: `sample-data/rivera-v-northstar` (fully synthetic)
 

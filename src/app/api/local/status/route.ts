@@ -1,11 +1,6 @@
 import { NextResponse } from "next/server";
 import { localVaultStatus } from "@/lib/local-vault";
-import {
-  assertLocalRequest,
-  LOCAL_SESSION_COOKIE,
-  localApiError,
-  readCookie
-} from "@/lib/local-request";
+import { assertLocalRequest, localApiError } from "@/lib/local-request";
 import { localModelStatus } from "@/lib/local-llm";
 
 export const dynamic = "force-dynamic";
@@ -15,7 +10,7 @@ export async function GET(request: Request) {
   try {
     assertLocalRequest(request);
     const [vault, model] = await Promise.all([
-      localVaultStatus(readCookie(request, LOCAL_SESSION_COOKIE)),
+      localVaultStatus(),
       localModelStatus()
     ]);
     return NextResponse.json(

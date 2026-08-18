@@ -13,6 +13,7 @@ internet:
 ```bash
 npm ci
 ollama pull qwen3:8b
+ollama pull qwen3-vl:8b
 npm run local:build
 npm run local:prepare-runtime
 npm run local:verify-runtime
@@ -74,6 +75,12 @@ AES-256 vault key in the signed-in user's macOS Keychain. The individual macOS
 account supplies unique user identification for this single-user appliance.
 Do not use a shared OS account.
 
+Workspaces created by an earlier password-based release do not produce a sign-in
+prompt. Because those files cannot be decrypted without their former password,
+Verity moves the complete locked vault to a timestamped `locked-vault` archive
+beside the active data directory and opens a fresh Keychain-protected workspace.
+The archived ciphertext is preserved for manual recovery or later disposal.
+
 1. Confirm FileVault, automatic screen lock, and the firm's managed OS identity
    controls are active.
 2. Start the app only through `npm run local:start`.
@@ -88,14 +95,18 @@ Losing the Keychain item makes the encrypted evidence unrecoverable.
 ## Matter workflow
 
 1. Add supported files or a case folder.
-2. Confirm each file reaches a ready evidence state.
-3. Wait for both separate model-review passes and deterministic byte checks.
-4. Inspect the verification register. Only exact source spans become
-   authoritative query claims; model-authored paraphrases are not published as
-   verified claims.
-5. Query the verified record.
-6. Inspect every answer citation.
-7. Use XLSX, JSON, or DOCX for ordinary exports. CSV is formula-neutralized,
+2. Confirm each file reaches a ready source state and is not quarantined.
+3. Confirm the administrative field registry fits the matter and dynamic
+   labeled-field discovery is enabled.
+4. Wait for classification, OCR, extraction, both independent model reviews,
+   normalization, reconciliation, and deterministic byte checks.
+5. Resolve only conflicts, uncertain handwriting, ambiguous identifiers or
+   dates, and matter mismatches in **Exceptions**.
+6. Use **Find Information** and inspect every exact-source citation.
+7. Open **Download Case Package** and build the complete package. Download the ZIP for a
+   self-contained handoff or download SQLite, DOCX, XLSX, and PDF files
+   individually. The open files may contain PHI and must be saved only to an
+   encrypted, access-controlled destination. CSV values are formula-neutralized,
    but the destination spreadsheet and workstation remain controlled systems.
 8. Enable a legal hold when preservation duties apply.
 9. Download an encrypted backup and move it to approved encrypted backup media.
@@ -103,15 +114,15 @@ Losing the Keychain item makes the encrypted evidence unrecoverable.
 
 ## Backup restoration exercise
 
-The encrypted backup contains ciphertext from `.verity-local-data`; the
+The encrypted backup contains ciphertext from `~/.verity-caseworks/data`; the
 Keychain-held decryption key is intentionally not included. Backup creation
 registers the archive's audit head as an approved restore point in Keychain.
 The appliance retains the latest 32 approved restore points and rejects an
 unregistered filesystem rollback.
 
 1. Stop the application.
-2. Preserve the current `.verity-local-data` directory.
-3. Extract the backup into the repository as `.verity-local-data`.
+2. Preserve the current `~/.verity-caseworks/data` directory.
+3. Extract the backup into `~/.verity-caseworks/data`, or the absolute `LOCAL_DATA_DIRECTORY` selected by the firm.
 4. Ensure the directory permission is `0700` and files are `0600` on Unix-like
    systems.
 5. Restore only under the original managed macOS account with its Keychain item
@@ -129,7 +140,7 @@ compromised:
 
 1. stop the appliance and disconnect the workstation according to the firm's
    incident plan;
-2. preserve `.verity-local-data/audit.jsonl` and relevant endpoint telemetry;
+2. preserve `~/.verity-caseworks/data/audit.jsonl` and relevant endpoint telemetry;
 3. do not delete or modify evidence subject to legal hold;
 4. notify the designated security and privacy contacts;
 5. conduct the required HIPAA breach-risk assessment;
