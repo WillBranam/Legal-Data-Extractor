@@ -2,6 +2,13 @@
 
 Last verified: August 18, 2026
 
+> **Status change.** The truncated-JSON extraction failure described below has
+> been root-caused, reproduced deterministically, and fixed. See
+> [Resolved: truncated structured output](#resolved-truncated-structured-output).
+> The fix has not yet been validated by `npm test`, `npm run lint`,
+> `npm run build`, or a browser E2E pass. Run
+> [Validation after a fix](#validation-after-a-fix) before trusting it.
+
 This document is the engineering runbook for diagnosing local file ingestion,
 OCR, extraction, and apparent processing stalls. It also provides a compact,
 PHI-safe handoff for another model or a continuation after context compaction.
@@ -16,13 +23,14 @@ For end-user setup and compliance boundaries, see `LOCAL_RUNBOOK.md` and
 - A synthetic one-page administrative fact sheet completed end to end through
   encrypted storage, extraction, two review passes, citation checks, and
   workspace persistence.
-- Larger DOCX and PDF files can still fail during structured extraction when
-  `qwen3:8b` returns JSON truncated in the middle of a string. The stored source,
-  parsed text, and OCR artifacts are retained, but the document is marked
-  extraction failed and should expose a retry action.
-- The next implementation priority is a bounded, resumable extraction strategy
-  with automatic recovery from truncated model output. Do not treat increasing
-  the model timeout alone as a sufficient fix.
+- The truncated-JSON extraction failure on larger DOCX and PDF files has been
+  root-caused and fixed. It was an output-token budget set below what the JSON
+  Schema permitted, not a timeout. Increasing the model timeout would not have
+  helped.
+- Files can now be added by drag-and-drop and by paste as well as the picker.
+  Previously neither existed, and a dragged file navigated away from the app.
+- The next implementation priority is throughput and durability, not the model
+  boundary. See `## Production readiness`.
 
 ## Know which server you are testing
 
@@ -79,7 +87,10 @@ locked while selected documents are nonterminal.
 | Immediate `0 documents processed` | No document `PUT`, OCR, or extract request | Live `FileList` was cleared before it was copied | Confirm the current branch includes the early `Array.from(files)` snapshot; do not add delays |
 | File appears but never becomes ready | Document `PUT` missing or failed | Vault write, file size/type validation, or client-side exception | Inspect the document state and sanitized server error; test one small TXT fixture |
 | OCR returns `503` | `POST /api/local/ocr 503` and local status is not ready | Missing OCR assets/runtime or unavailable local visual/OCR worker | Run `npm run local:check`; prepare all local models and OCR weights before disconnecting the network |
-| OCR succeeds but extraction returns `400` after roughly a minute | Canonical artifact exists; extract error contains `Unterminated string in JSON` | Model output was truncated before valid JSON completed | Keep source/OCR artifacts, mark extraction failed, and retry only after bounded-output recovery is implemented |
+| Extraction returns `400` with `MODEL_OUTPUT_TRUNCATED` | Extract error code, and `reviewSummary.truncationRecoveries` above zero | Output-token budget exhausted for that span | Expected and recoverable. Salvage keeps complete objects; investigate only if coverage is `partial` |
+| Extraction returns `400` with a raw JSON `SyntaxError` | Any parser text reaching the browser | A code path bypassing `disclosableErrorCode` | Regression. Add the code to the allowlist in `local-request.ts`; never echo `error.message` |
+| A document shows complete but values are missing | `reviewSummary.coverage` is `partial` | Not every page was scanned | The document must display as retryable, not complete. If it shows complete, that is a disclosure bug — fix it before anything else |
+| Dragging a file navigates away from the app | Workspace state lost on drop | `dragover` handler missing its `preventDefault` | Regression in the shell drag handlers |
 | Only repeated status `200`s appear | No document `PUT`, OCR, or extract request | The app is polling readiness, not ingesting | Verify the correct app/port and reproduce with one supported fixture while watching the browser state |
 | Document reports processing after a restart | Stored state has a nonterminal phase with no active job | Interrupted browser-owned workflow | Repair to a retryable failed/interrupted state; never claim completion |
 | Query is enabled while extraction is active | Workspace has queued/processing documents | Lock calculation is using stale or incomplete state | Treat any selected nonterminal document as a global query/export lock |
@@ -94,13 +105,16 @@ after invoking `importFiles`, so awaiting readiness before copying the list made
 the list empty. The safe order is:
 
 ```ts
-async function importFiles(files: FileList | null): Promise<void> {
-  const selected = files ? Array.from(files) : [];
-  if (!workspace || selected.length === 0 || processing) return;
+async function importFiles(files: FileList | File[] | null): Promise<void> {
+  if (!workspace || processing) return;
+  const offered = files ? Array.from(files) : [];
 
   // Readiness checks may await only after the immutable snapshot exists.
 }
 ```
+
+Drop and paste hand in a plain `File[]`, which is already immutable; only the
+picker's `FileList` is live. The signature accepts both.
 
 Regression requirements:
 
@@ -111,7 +125,7 @@ Regression requirements:
 - A readiness failure must explain why processing did not start and must not
   report `0 documents processed` as success.
 
-## Current structured-extraction failure
+## Historic structured-extraction failure (resolved)
 
 Two real-world-sized test files reached encrypted storage and parsing. A
 17-page PDF also completed local OCR for every page with mean OCR confidence of
@@ -127,7 +141,7 @@ the structured model-response boundary. A deterministic retry with identical
 context and token limits is likely to fail again and should not rerun successful
 OCR unnecessarily.
 
-Relevant current limits in `src/lib/local-llm.ts`:
+Historic limits in `src/lib/local-llm.ts` at the time of failure:
 
 - text model request timeout: 120 seconds;
 - maximum fields per extraction chunk: 16;
@@ -136,11 +150,101 @@ Relevant current limits in `src/lib/local-llm.ts`:
 - primary structured output budget: 1,600 tokens;
 - each review output budget: 384 tokens.
 
-Treat these values as a recorded baseline, not recommended final settings.
+The last two were the defect. Current values are derived per request; see
+[Resolved: truncated structured output](#resolved-truncated-structured-output).
+
+## Resolved: truncated structured output
+
+### Root cause
+
+`structuredChat` in `src/lib/local-llm.ts` called `JSON.parse` on the model's
+raw content without inspecting Ollama's `done_reason`. Two request sites set an
+output-token budget far below what their own JSON Schema permitted, so the model
+was cut off mid-value and the resulting `SyntaxError` surfaced as an HTTP `400`
+carrying the raw parser message.
+
+Both sites were reproduced against the live `qwen3:8b`:
+
+| Site | Previous setting | Schema ceiling | Reproduced result |
+| --- | --- | --- | --- |
+| Primary extraction | `maxTokens: 1600` | 16 field objects, `raw_value` and `exact_quote` up to 2,000 characters each | A 29-line civil case cover sheet — one page, one chunk — returned `done_reason: length`, `eval_count: 1600`, and failed to parse after 71.8 s |
+| Both review passes | `maxTokens: 384` | `maxItems: MAX_FACTS` (200) | 60 candidates returned `done_reason: length`, `eval_count: 384`, stopping at `proposal-55` |
+
+The review budget was a direct self-contradiction: 384 tokens holds roughly 55
+`"proposal-N"` elements against a schema allowing 200. Any document producing
+more than about 55 proposals failed review even when extraction had fully
+succeeded, and because `reviewProposalsWithLocalModel` was called without a
+`try`/`catch`, that discarded every valid proposal.
+
+Three behaviors turned a single bad response into a lost document:
+
+- `if (proposals.length === 0) throw error` aborted the whole document when the
+  first chunk failed.
+- Deadline exhaustion `break`s were silent, and the document was then stored as
+  complete with pages never read.
+- `localApiError` returned `error.message` verbatim for any unrecognized error.
+
+### What changed
+
+`src/lib/local-llm.ts`
+
+- `structuredChat` returns typed `TruncatedModelOutputError` (carrying the
+  partial content) and `MalformedModelOutputError` instead of leaking a
+  `SyntaxError`. Truncation is classified before parsing.
+- Output budgets are derived from the request rather than hardcoded:
+  `EXTRACTION_TOKENS_PER_FIELD` (220) and `REVIEW_TOKENS_PER_ID` (8).
+- `MAX_FIELDS_PER_CHUNK` 16 → 8, `MAX_CHUNK_CHARACTERS` 6,000 → 3,500.
+- `salvageTruncatedArrayItems` recovers the complete elements of a cut-off JSON
+  array. A truncated response is a valid prefix, so its finished field objects
+  and approval IDs are kept; only the incomplete tail element is dropped.
+- `extractChunkFields` retries a span at half the field budget when salvage
+  recovers nothing.
+- Review passes are batched at `REVIEW_BATCH_SIZE` (40) with a per-batch token
+  budget, and a failed batch marks its proposals **unreviewed** rather than
+  rejected. Unreviewed proposals keep their verified citation but have
+  confidence demoted to `0.5`, which routes them to the Exceptions queue for a
+  human instead of being silently dropped.
+- 30% of the extraction deadline is reserved for review so discovery cannot
+  consume the whole allowance.
+- `reviewSummary` now carries `coverage`, `coverageReason`, `pagesScanned`,
+  `totalPages`, `truncationRecoveries`, and `reviewCompleted`. A document that
+  was not scanned end to end is reported `partial` and must be disclosed.
+- `isConfiguredLocalModelInstalled` matches base name and tag prefix, so
+  `qwen3:8b-q4_K_M` and a bare `qwen3` no longer disable the application.
+
+`src/lib/local-request.ts`
+
+- `disclosableErrorCode` allowlists the codes that may reach the client.
+  Everything else becomes `LOCAL_API_ERROR`, so parser exceptions, filesystem
+  paths, and any document-derived text stay inside the server.
+
+`src/components/legal-workspace.tsx`
+
+- `EXTRACTION_ERROR_MESSAGES` maps each code to user-actionable text.
+- Partial coverage is written to the document's `extractionError` and named in
+  the import summary; the document is left retryable rather than shown complete.
+
+### Resolved: files could not be dropped or pasted
+
+The application had no `onDrop`, `onDragOver`, `onPaste`, or `dataTransfer`
+handler anywhere in `src/`. The only ingestion path was two hidden
+`<input type="file">` elements behind buttons, so dragging a file onto the
+window triggered the browser default and navigated away from the workspace,
+and `⌘V` did nothing.
+
+- A window-level `paste` listener and shell-level drag handlers now feed the
+  same `importFiles`, which accepts `FileList | File[] | null`. The
+  `preventDefault` on `dragover` is what stops the navigate-away data loss.
+- Model readiness no longer disables the upload buttons. Files are always
+  parsed, hashed, and stored; extraction is held in a retryable `not-started`
+  state when the model is down, so a stopped Ollama can never lose a document.
+- Rejected and unsupported files are reported by name instead of returning
+  silently.
+- `accept` now carries MIME types alongside extensions on both inputs.
 
 ## Fix list
 
-### P0 — extraction reliability
+### P0 — extraction reliability (implemented; see above)
 
 - Detect empty, malformed, and likely truncated JSON separately from semantic
   schema-validation failures.
@@ -218,19 +322,128 @@ npm run build
 
 Then perform a browser test with an isolated profile:
 
-1. Upload one small synthetic TXT fixture.
-2. Confirm the document write occurs and the source row shows active progress.
-3. Confirm extraction reaches a terminal state and survives a page reload.
-4. Ask a narrow administrative query and inspect its exact source citation.
-5. Upload a synthetic multi-page PDF that needs OCR.
-6. Force one truncated response and confirm bounded resume does not repeat OCR
-   or duplicate values.
-7. Confirm the browser console has no uncaught errors.
+```bash
+npm run local:model                                    # terminal 1
+LOCAL_DATA_PROFILE=qa-ingest-fix npm run local -- -p 3010   # terminal 2
+```
+
+Confirm the page title is **Verity Caseworks** before testing.
+
+Ingestion paths — each must produce an encrypted document write:
+
+1. Click **Add files** and choose one small synthetic TXT fixture.
+2. Drag a synthetic PDF from Finder onto the window. The dashed drop overlay
+   must appear, and the app must **not** navigate away.
+3. Copy a file in Finder and press `⌘V` over the window.
+4. Drop a `.pages` or other unsupported file. It must be named in a skip notice,
+   not silently ignored.
+5. Stop Ollama, then add a file. It must still be stored, and appear with a
+   retryable state and a message naming `npm run local:model` — never lost.
+
+Extraction:
+
+6. Restart Ollama and use **Retry extraction**. Confirm OCR is not repeated.
+7. Add a multi-page synthetic PDF that needs OCR — the 17-page fixture that
+   previously failed is the key regression. It must reach a terminal state.
+8. Confirm any document that could not be scanned end to end shows
+   `pagesScanned of totalPages` and stays retryable. It must never display as
+   complete.
+9. Confirm no error message on screen contains raw JSON, a `SyntaxError`, a
+   stack trace, a filesystem path, or any document text.
+10. Ask a narrow administrative query and inspect its exact source citation.
+11. Confirm extraction survives a page reload and the console has no uncaught
+    errors.
+
+To force a truncation without a large document, temporarily lower
+`EXTRACTION_TOKENS_PER_FIELD` in `src/lib/local-llm.ts` to `20`. Salvage must
+still publish the complete field objects, and coverage must report `partial`.
+Restore the constant afterward.
 
 The last verified automated baseline was 35 passing tests, successful lint, and
 a successful production build. The build emitted an existing Turbopack file-
 trace warning related to the local-vault route; do not silently classify that
 warning as an ingestion failure.
+
+## Production readiness
+
+The target is a firm-managed workstation processing hundreds of documents per
+matter. These are the structural gaps between the current build and that target,
+in dependency order. None are model-quality problems.
+
+### Measured throughput does not reach that scale
+
+One 6,000-character chunk took 71.8 s on the test hardware. OCR runs 7–19.5 s
+per page. A 17-page PDF is roughly seven chunks of discovery plus OCR plus two
+review passes — about twelve minutes. Two hundred documents is therefore on the
+order of forty hours, run serially inside `importFiles` in a browser tab that
+cannot be closed.
+
+The highest-leverage change is not a faster model.
+`deterministicLabeledProposals` already exists, already produces exact-byte
+citations, and costs nothing, but the model still re-processes every chunk
+regardless of what the regex pass already resolved. Legal intake forms, cover
+sheets, service records, and notices are overwhelmingly `Label: value` lines.
+Run the deterministic pass first and send only unresolved regions to the model.
+Measure the reduction in model calls per document before tuning anything else.
+
+### Persistence is quadratic
+
+`updateWorkspace` is called once per document inside the import loop, and
+`saveWorkspace` serializes the entire workspace — including every document's
+full `canonicalText` — to JSON, ships it over HTTP, Zod-validates the whole
+tree, re-encrypts it, and rewrites it. The workspace endpoint's bound is
+256 MB. Document 200 rewrites all 200.
+
+The project already builds a real SQLite database for export. That schema should
+become the primary store, with per-document and per-occurrence rows, so a write
+is O(1) and an interruption costs one document rather than the matter.
+
+### Orchestration is owned by the browser
+
+Closing the tab kills the batch. Import needs to move to a durable server-side
+job queue with one row per document and resumable phases, leaving the browser as
+a viewer that polls job state. This must land before any throughput tuning —
+optimizing a serial browser loop that rewrites the whole workspace per document
+optimizes the wrong layer.
+
+### There is no accuracy measurement
+
+All 35 tests pass and the export-package test is thorough, but nothing exercises
+`src/lib/local-llm.ts`, and there is no labeled gold set. For a tool whose value
+is that it is more accurate than a person reading the file, shipping without
+per-field recall, precision, exception rate, and citation-exactness is the
+largest risk in the project. Both defects fixed here would have been caught by a
+fixture returning `done_reason: "length"`.
+
+Required fixtures, none of which need a running model:
+
+- truncated JSON mid-string and mid-object;
+- invalid JSON;
+- an empty object;
+- an array exceeding `maxItems`;
+- valid JSON exactly at the output limit;
+- a live `FileList` cleared immediately after dispatch.
+
+### Suggested sequence
+
+| Phase | Work | Exit condition |
+| --- | --- | --- |
+| 1 | Validate the fixes in this document | 17-page PDF and large DOCX both reach a terminal state with honest coverage |
+| 2 | Model-boundary fixtures and the `FileList` regression test | The fixed defects are unreproducible without a running model |
+| 3 | Durable server-side job queue | Closing the tab mid-batch loses nothing |
+| 4 | SQLite as primary store | Per-document write time is flat from document 1 to 200 |
+| 5 | Deterministic-first routing, bounded concurrency, warm weights | Median form-heavy document under 90 s |
+| 6 | Labeled gold set and per-release accuracy tracking | Published numbers a firm can rely on when accepting the tool |
+| 7 | Multi-matter isolation, retention, tested backup/restore drill | A workstation can be approved against a completed checklist |
+
+### What is already sound
+
+Worth recording so it is not refactored away. Quotations are reconstructed from
+immutable canonical bytes and verified for exact UTF-8 match; the server, not
+the model, hydrates the final quote; prompt-injection screening covers the
+surrounding context as well as the quote; `validatedLocalModelEndpoint` enforces
+loopback strictly. The evidence layer is the hard part of this product and it is
+correct. The defects were all in the orchestration around it.
 
 ## Agent and context-compaction handoff
 
@@ -273,17 +486,28 @@ Verified upload bug and fix:
 - Browser E2E then showed document PUT 200, extract 200, persisted terminal
   state, 6 auto-published values, 1 exception, and clean console.
 
-Current unresolved failure:
-- Larger DOCX/PDF files store and parse successfully; the tested 17-page PDF
-  also completed OCR for all pages at about 0.88 mean confidence.
-- qwen3:8b extraction then returned HTTP 400 after about 80 seconds because the
-  structured JSON ended mid-string (`Unterminated string in JSON`).
-- Source/canonical/OCR artifacts remain stored. Do not re-OCR unchanged files.
+Resolved truncation failure:
+- Root cause was an output-token budget below the JSON Schema ceiling, not a
+  timeout. Primary extraction used 1,600 tokens for a 16-field schema; both
+  review passes used 384 tokens for a 200-item schema (~55 IDs fit).
+- structuredChat now classifies done_reason "length" as TruncatedModelOutputError
+  before parsing, salvages complete array elements, retries at a smaller field
+  budget, batches review at 40 candidates, and reserves 30% of the deadline for
+  review. A failed review batch demotes proposals to the exceptions queue rather
+  than discarding them.
+- reviewSummary now reports coverage/pagesScanned/totalPages. A partially
+  scanned document must never display as complete.
+
+Resolved ingestion failure:
+- No drop or paste handler existed; dragging a file navigated away from the app.
+  Window paste listener and shell drag handlers now feed the same importFiles.
+- Model readiness no longer disables upload. Files are always stored; extraction
+  is held retryable when the model is down.
 
 Next task:
-Implement and test bounded recovery for truncated model JSON: smaller field and
-text groups, strict output lengths, resumable per-chunk persistence, deterministic
-deduplication, phase-specific deadline reserves, and a PHI-safe user error.
+Validate (npm test, lint, build, browser E2E on an isolated profile), then move
+orchestration off the browser into a durable job queue and replace
+whole-workspace writes with the SQLite schema. See ## Production readiness.
 
 Guardrails:
 - Verify current code and git status first; preserve dirty worktree changes.

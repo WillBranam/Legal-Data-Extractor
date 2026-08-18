@@ -160,11 +160,17 @@ app finds an earlier password-locked vault, it preserves that entire vault in a
 timestamped `locked-vault` archive beside the active data directory and opens a
 fresh Keychain-protected workspace. It never asks for the old password.
 
-1. Add supported case files or one matter folder.
+1. Add supported case files or one matter folder. Use the **Add files** and
+   **Add matter folder** buttons, drag files onto the window, or paste them with
+   `⌘V`. Unsupported files are named and skipped rather than ignored. Files are
+   stored even when the local text model is not running; extraction then waits
+   and can be started later with **Retry extraction**.
 2. Review or adjust the enabled administrative field registry.
 3. Wait until classification, OCR, extraction, two independent model-review
    passes, normalization, exact-byte verification, reconciliation, and encrypted
-   save finish. Lookup and export remain locked while this runs.
+   save finish. Lookup and export remain locked while this runs. A document that
+   could not be scanned end to end is reported with the pages actually read and
+   stays retryable; it is never presented as complete.
 4. Resolve only the short **Exceptions** queue. Clear values publish automatically.
 5. Use **Find Information** for administrative lookup and inspect exact citations.
 6. Open **Download Case Package**, acknowledge that the open package may contain
