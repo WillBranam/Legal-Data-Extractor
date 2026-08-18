@@ -1,5 +1,9 @@
 # Offline Local-Appliance Runbook
 
+For engineering diagnosis of upload, OCR, extraction, or apparent processing
+stalls—and for a PHI-safe model/context handoff—see
+[`INGESTION_DEBUGGING_HANDOFF.md`](./INGESTION_DEBUGGING_HANDOFF.md).
+
 ## One-time preparation
 
 Local-first v1 supports a firm-managed Mac with FileVault full-disk

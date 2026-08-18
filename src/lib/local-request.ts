@@ -77,8 +77,40 @@ export async function requireLocalSession(request: Request, mutation = false) {
   return session;
 }
 
+// Only these codes are echoed to the client. Anything else — a JSON
+// SyntaxError, a filesystem path, a model response — is replaced with a generic
+// code so internal detail and any document-derived text stay inside the server.
+const DISCLOSABLE_ERROR_CODES = new Set([
+  "LOCAL_MODE_DISABLED",
+  "LOOPBACK_REQUIRED",
+  "ORIGIN_MISMATCH",
+  "WORKSPACE_CONFLICT",
+  "AUDIT_CHAIN_INVALID",
+  "MODEL_OUTPUT_TRUNCATED",
+  "MODEL_OUTPUT_MALFORMED",
+  "LOCAL_MODEL_UNAVAILABLE",
+  "LOCAL_MODEL_EMPTY_RESPONSE",
+  "LOCAL_MODEL_DEADLINE_EXCEEDED",
+  "LOCAL_MODEL_MUST_USE_LOOPBACK",
+  "LOCAL_MODEL_NAME_REQUIRED",
+  "LOCAL_VISUAL_MODEL_NAME_REQUIRED",
+  "INVALID_LOCAL_MODEL_URL",
+  "CANONICAL_ARTIFACT_TOO_LARGE",
+  "DOCUMENT_PAGE_LIMIT_EXCEEDED",
+  "EXTRACTION_REQUEST_TOO_LARGE",
+  "WORKSPACE_TOO_LARGE",
+  "REVIEW_PAGE_NOT_FOUND"
+]);
+
+export function disclosableErrorCode(error: unknown): string {
+  const raw = error instanceof Error ? error.message : "";
+  if (DISCLOSABLE_ERROR_CODES.has(raw)) return raw;
+  if (/^LOCAL_(MODEL|VISUAL_MODEL|API)_HTTP_\d{3}$/.test(raw)) return raw;
+  return "LOCAL_API_ERROR";
+}
+
 export function localApiError(error: unknown): NextResponse {
-  const code = error instanceof Error ? error.message : "LOCAL_API_ERROR";
+  const code = disclosableErrorCode(error);
   const status =
     code === "LOCAL_MODE_DISABLED" || code === "LOOPBACK_REQUIRED"
         ? 404

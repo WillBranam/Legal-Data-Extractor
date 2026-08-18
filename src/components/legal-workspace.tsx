@@ -39,12 +39,31 @@ function formatDate(value: string): string {
   return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(value));
 }
 
+// Maps server error codes to text a legal user can act on. Raw model output,
+// parser exceptions, and file paths must never reach this screen.
+const EXTRACTION_ERROR_MESSAGES: Record<string, string> = {
+  MODEL_OUTPUT_TRUNCATED: "The local model response was incomplete. Your file and OCR results were saved; retry will resume extraction.",
+  MODEL_OUTPUT_MALFORMED: "The local model returned an unreadable response. Your file and OCR results were saved; retry extraction.",
+  LOCAL_MODEL_HTTP_404: "The configured Ollama model is not installed. Run npm run local:setup, then retry extraction.",
+  LOCAL_MODEL_UNAVAILABLE: "The local model is unavailable. Start it with npm run local:model, then retry extraction.",
+  LOCAL_MODEL_EMPTY_RESPONSE: "The local model returned nothing for this document. Retry extraction.",
+  LOCAL_MODEL_DEADLINE_EXCEEDED: "The local model did not finish in time. Retry extraction after confirming Ollama is responsive.",
+  CANONICAL_ARTIFACT_TOO_LARGE: "This document is too large for local extraction. Split it and add the parts separately.",
+  DOCUMENT_PAGE_LIMIT_EXCEEDED: "This document has more pages than local extraction supports. Split it and add the parts separately.",
+  EXTRACTION_REQUEST_TOO_LARGE: "This document's text is too large to send to local extraction in one request. Split it and add the parts separately.",
+  AUDIT_CHAIN_INVALID: "The local audit log failed verification. Extraction is blocked until it is investigated.",
+  LOCAL_API_ERROR: "Extraction failed for an unexpected reason. Your file and OCR results were saved; retry extraction."
+};
+
 function extractionErrorMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : "Extraction failed.";
-  if (/timeout|timed out|deadline|abort/i.test(message)) return "The local model did not finish in time. Retry extraction after confirming Ollama is responsive.";
-  if (/not installed|HTTP_404/i.test(message)) return "The configured Ollama model is not installed. Run npm run local:setup, then retry extraction.";
-  if (/unavailable|fetch failed|ECONNREFUSED/i.test(message)) return "The local model is unavailable. Start it with npm run local:model, then retry extraction.";
-  return message;
+  const message = error instanceof Error ? error.message : "";
+  const mapped = EXTRACTION_ERROR_MESSAGES[message];
+  if (mapped) return mapped;
+  if (/timeout|timed out|deadline|abort/i.test(message)) return EXTRACTION_ERROR_MESSAGES.LOCAL_MODEL_DEADLINE_EXCEEDED;
+  if (/HTTP_404/i.test(message)) return EXTRACTION_ERROR_MESSAGES.LOCAL_MODEL_HTTP_404;
+  if (/unavailable|fetch failed|ECONNREFUSED/i.test(message)) return EXTRACTION_ERROR_MESSAGES.LOCAL_MODEL_UNAVAILABLE;
+  if (/^[A-Z][A-Z0-9_]{3,}$/.test(message)) return EXTRACTION_ERROR_MESSAGES.LOCAL_API_ERROR;
+  return message || EXTRACTION_ERROR_MESSAGES.LOCAL_API_ERROR;
 }
 
 function repairLoadedWorkspace(saved: WorkspaceState): { state: WorkspaceState; changed: boolean } {
@@ -76,6 +95,22 @@ function repairLoadedWorkspace(saved: WorkspaceState): { state: WorkspaceState; 
 
 interface ProcessingStatus { fileName: string; fileNumber: number; totalFiles: number; message: string; progress: number | null }
 
+// Must stay in sync with the extension branches in parseLocalFile.
+const SUPPORTED_SOURCE_EXTENSIONS = ["pdf", "docx", "txt", "eml", "msg", "jpg", "jpeg", "png", "tif", "tiff"];
+const SOURCE_FILE_ACCEPT = [
+  ".pdf", ".docx", ".txt", ".eml", ".msg", ".jpg", ".jpeg", ".png", ".tif", ".tiff",
+  // MIME types as well: extension-only accept lists cause macOS pickers to grey
+  // out otherwise-valid documents served from cloud storage providers.
+  "application/pdf",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "text/plain", "message/rfc822", "application/vnd.ms-outlook",
+  "image/jpeg", "image/png", "image/tiff"
+].join(",");
+
+function isSupportedSourceFile(file: File): boolean {
+  return SUPPORTED_SOURCE_EXTENSIONS.includes(file.name.toLowerCase().split(".").pop() ?? "");
+}
+
 export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
   const [workspace, setWorkspace] = useState<WorkspaceState | null>(null);
   const [localStatus, setLocalStatus] = useState<LocalRuntimeStatus | null>(null);
@@ -91,6 +126,7 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
   const [selectedCitationId, setSelectedCitationId] = useState<string | null>(null);
   const [exportJob, setExportJob] = useState<LocalExportJob | null>(null);
   const [exportAcknowledged, setExportAcknowledged] = useState(false);
+  const [dragging, setDragging] = useState(false);
   const [fieldSearch, setFieldSearch] = useState("");
   const [newFieldLabel, setNewFieldLabel] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -148,21 +184,37 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
     setWorkspace(next);
   }
 
-  async function importFiles(files: FileList | null): Promise<void> {
-    if (!workspace || !files?.length || processing) return;
-    if (localMode) {
-      const status = await refreshLocalStatus().catch(() => null);
-      if (!status?.model.reachable || !status.model.installed) {
-        setNotice("Extraction cannot start until the local text model is ready. Run npm run local:model in another Terminal, then try again.");
-        return;
-      }
+  // Accepts a live FileList (file picker), or a plain array (drop and paste).
+  // The caller's FileList must be snapshotted before the first await because
+  // the input clears its value as soon as the change handler returns.
+  async function importFiles(files: FileList | File[] | null): Promise<void> {
+    if (!workspace || processing) return;
+    const offered = files ? Array.from(files) : [];
+    if (offered.length === 0) {
+      setNotice("No files were added. Choose supported case files, or drop or paste them onto this window.");
+      return;
     }
-    const selected = Array.from(files);
+    const selected = offered.filter(isSupportedSourceFile);
+    const unsupported = offered.filter((file) => !isSupportedSourceFile(file));
+    if (selected.length === 0) {
+      setNotice(`No supported files were added. Verity reads PDF, DOCX, TXT, EML, MSG, JPEG, PNG, and TIFF. Skipped: ${unsupported.map((file) => file.name).join(", ")}`);
+      return;
+    }
     const total = selected.reduce((sum, file) => sum + file.size, 0);
     if (selected.length > 200 || total > 500 * 1024 * 1024 || selected.some((file) => file.size > MAX_SOURCE_FILE_BYTES)) {
       setNotice("Use at most 200 files, 500 MB per batch, and 100 MB per file."); return;
     }
+    // Readiness no longer blocks ingestion. Files are always parsed, hashed, and
+    // stored; extraction is held as a retryable queued state when the model is
+    // down, so a stopped Ollama can never cause a document to be lost.
+    let modelReady = !localMode;
+    if (localMode) {
+      const status = await refreshLocalStatus().catch(() => null);
+      modelReady = Boolean(status?.model.reachable && status.model.installed);
+    }
     setNotice(null); setAnswer(null);
+    let queued = 0;
+    const partial: string[] = [];
     let next = { ...workspace, documents: [...workspace.documents] };
     const staged: string[] = [];
     const errors: string[] = [];
@@ -177,17 +229,25 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
           if (next.documents.some((item) => item.originalSha256 === document.originalSha256)) { duplicates += 1; continue; }
           currentDocumentId = document.id;
           if (localMode) { await storeOriginalFile(document.id, file); staged.push(document.id); }
+          const extractable = localMode && document.processingState === "ready" && Boolean(document.canonicalText);
           const queuedDocument = {
             ...document,
-            extractionState: localMode && document.processingState === "ready" && document.canonicalText ? "processing" as const : "not-started" as const,
-            extractionError: null
+            extractionState: extractable && modelReady ? "processing" as const : "not-started" as const,
+            extractionError: extractable && !modelReady
+              ? "The local text model was not running when this file was added. Run npm run local:model, then retry extraction."
+              : null
           };
           next = { ...next, documents: [...next.documents, queuedDocument] };
-          if (localMode && document.processingState === "ready" && document.canonicalText) {
+          if (extractable && !modelReady) queued += 1;
+          if (extractable && modelReady) {
             setProcessing({ fileName: file.name, fileNumber: index + 1, totalFiles: selected.length, message: "Extracting names, identifiers, dates, signatures, contacts, and labeled fields", progress: null });
             const result = await extractDocumentWithLocalModel(queuedDocument, next.fieldDefinitions ?? []);
             setProcessing({ fileName: file.name, fileNumber: index + 1, totalFiles: selected.length, message: "Reconciling values and verifying exact source bytes", progress: (index + 0.92) / selected.length });
             next = applyAdministrativeExtraction(next, queuedDocument, result);
+            if (result.reviewSummary.coverage === "partial") {
+              partial.push(`${file.name} (${result.reviewSummary.pagesScanned} of ${result.reviewSummary.totalPages} pages)`);
+              next = { ...next, documents: next.documents.map((item) => item.id === document.id ? { ...item, extractionState: "failed" as const, extractionError: `${result.reviewSummary.coverageReason ?? "This document was not scanned end to end."} ${result.reviewSummary.pagesScanned} of ${result.reviewSummary.totalPages} pages were read. Retry extraction to finish it.` } : item) };
+            }
             verified += (next.fieldOccurrences ?? []).filter((item) => item.documentId === document.id && item.status === "verified").length;
             exceptions += (next.fieldOccurrences ?? []).filter((item) => item.documentId === document.id && item.status === "exception").length;
           }
@@ -206,11 +266,58 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
       next = { ...next, matter: { ...next.matter, updatedAt: new Date().toISOString() } };
       await updateWorkspace(next);
       setView("records");
-      setNotice(`${selected.length - errors.length - duplicates} document${selected.length - errors.length - duplicates === 1 ? "" : "s"} processed. ${verified} values published automatically; ${exceptions} need exception review.${duplicates ? ` ${duplicates} exact duplicate${duplicates === 1 ? " was" : "s were"} skipped.` : ""}${errors.length ? ` ${errors.length} failed: ${errors.join("; ")}` : ""}`);
+      const processedCount = selected.length - errors.length - duplicates;
+      setNotice([
+        `${processedCount} document${processedCount === 1 ? "" : "s"} processed.`,
+        `${verified} values published automatically; ${exceptions} need exception review.`,
+        queued ? `${queued} document${queued === 1 ? " is" : "s are"} stored and waiting for the local text model. Start it, then use Retry extraction.` : "",
+        partial.length ? `Incomplete — not every page was read: ${partial.join("; ")}. Retry extraction to finish.` : "",
+        duplicates ? `${duplicates} exact duplicate${duplicates === 1 ? " was" : "s were"} skipped.` : "",
+        unsupported.length ? `${unsupported.length} unsupported file${unsupported.length === 1 ? " was" : "s were"} skipped: ${unsupported.map((file) => file.name).join(", ")}.` : "",
+        errors.length ? `${errors.length} failed: ${errors.join("; ")}` : ""
+      ].filter(Boolean).join(" "));
     } catch (error) {
       if (localMode) await Promise.allSettled(staged.map(deleteStagedOriginalFile));
       setNotice(error instanceof Error ? error.message : "Import failed.");
     } finally { await ocr.terminate().catch(() => undefined); setProcessing(null); setImportProgress(null); }
+  }
+
+  // Files can arrive three ways. Only the picker existed before, which meant a
+  // dragged file triggered the browser default and navigated away from the
+  // workspace, and a pasted file did nothing at all.
+  const importFilesRef = useRef(importFiles);
+  importFilesRef.current = importFiles;
+
+  useEffect(() => {
+    function onPaste(event: ClipboardEvent): void {
+      const pasted = Array.from(event.clipboardData?.files ?? []);
+      if (pasted.length === 0) return;
+      event.preventDefault();
+      void importFilesRef.current(pasted);
+    }
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, []);
+
+  function onDragOver(event: React.DragEvent): void {
+    if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+    // Without preventDefault the browser opens the dropped file and discards
+    // the workspace. This must run even while processing is locked.
+    event.preventDefault();
+    event.dataTransfer.dropEffect = processing ? "none" : "copy";
+    if (!processing) setDragging(true);
+  }
+
+  function onDragLeave(event: React.DragEvent): void {
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    setDragging(false);
+  }
+
+  function onDrop(event: React.DragEvent): void {
+    if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+    event.preventDefault();
+    setDragging(false);
+    void importFilesRef.current(Array.from(event.dataTransfer.files));
   }
 
   async function retryDocumentExtraction(documentId: string): Promise<void> {
@@ -297,9 +404,13 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
   const selectedCitation = workspace.citations.find((item) => item.id === selectedCitationId) ?? null;
   const selectedDocument = selectedCitation ? documents.get(selectedCitation.documentId) ?? null : null;
   const textModelReady = !localMode || Boolean(localStatus?.model.reachable && localStatus.model.installed);
+  // Adding files never depends on the model — documents are stored either way.
+  // Only retrying extraction does.
+  const uploadDisabled = Boolean(processing);
   const actionsDisabled = Boolean(processing) || !textModelReady;
 
-  return <div className="app-shell">
+  return <div className={`app-shell ${dragging ? "dragging" : ""}`} onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}>
+    {dragging ? <div className="drop-overlay" role="status"><FolderUp size={34} /><strong>Drop case files to add them</strong><span>PDF, DOCX, TXT, EML, MSG, JPEG, PNG, TIFF &middot; files stay on this workstation</span></div> : null}
     <aside className={`sidebar ${sidebarOpen ? "open" : ""}`}>
       <div className="brand"><span className="brand-mark">VC</span><span>Verity Caseworks</span><button className="mobile-close" onClick={() => setSidebarOpen(false)} aria-label="Close navigation"><X size={18} /></button></div>
       <nav>{navItems.map(([id, label, Icon]) => <button key={id} className={`nav-item ${view === id ? "active" : ""}`} onClick={() => { setView(id); setSidebarOpen(false); }}><Icon size={17} /><span>{label}</span>{id === "review" && exceptions.length + matterExceptions > 0 ? <b className="nav-count">{exceptions.length + matterExceptions}</b> : null}</button>)}</nav>
@@ -311,16 +422,16 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
       {localMode && !textModelReady && !processing ? <div className="runtime-warning" role="alert"><AlertTriangle size={18} /><span><strong>Local extraction is paused.</strong> Start Ollama with <code>npm run local:model</code>. Upload and retry controls will unlock when {localStatus?.model.model ?? "the configured model"} is available.</span></div> : null}
       {notice ? <div className="notice-bar"><span>{notice}</span><button onClick={() => setNotice(null)} aria-label="Dismiss"><X size={16} /></button></div> : null}
       <section className="content-area">
-        {view === "overview" ? <CaseData workspace={workspace} verifiedCount={verified.length} exceptionCount={exceptions.length + matterExceptions} disabled={actionsDisabled} onUpload={() => fileInputRef.current?.click()} onFolder={() => folderInputRef.current?.click()} onView={setView} onToggleField={toggleField} fieldSearch={fieldSearch} onFieldSearch={setFieldSearch} newFieldLabel={newFieldLabel} onNewFieldLabel={setNewFieldLabel} onAddField={addCustomField} /> : null}
-        {view === "documents" ? <SourceDocuments workspace={workspace} disabled={actionsDisabled} onUpload={() => fileInputRef.current?.click()} onDownload={localMode ? downloadOriginalFile : undefined} onRetry={localMode ? retryDocumentExtraction : undefined} /> : null}
+        {view === "overview" ? <CaseData workspace={workspace} verifiedCount={verified.length} exceptionCount={exceptions.length + matterExceptions} disabled={uploadDisabled} onUpload={() => fileInputRef.current?.click()} onFolder={() => folderInputRef.current?.click()} onView={setView} onToggleField={toggleField} fieldSearch={fieldSearch} onFieldSearch={setFieldSearch} newFieldLabel={newFieldLabel} onNewFieldLabel={setNewFieldLabel} onAddField={addCustomField} /> : null}
+        {view === "documents" ? <SourceDocuments workspace={workspace} disabled={uploadDisabled} retryDisabled={actionsDisabled} onUpload={() => fileInputRef.current?.click()} onDownload={localMode ? downloadOriginalFile : undefined} onRetry={localMode ? retryDocumentExtraction : undefined} /> : null}
         {view === "records" ? <ExtractedInformation workspace={workspace} onCitation={setSelectedCitationId} /> : null}
         {view === "review" ? <Exceptions workspace={workspace} disabled={!!processing} onResolve={resolveException} onResolveDocument={resolveDocument} onCitation={setSelectedCitationId} /> : null}
         {view === "query" ? <FindInformation workspace={workspace} question={question} answer={answer} disabled={!!processing || querying} querying={querying} onQuestion={setQuestion} onSubmit={askQuestion} onCitation={setSelectedCitationId} /> : null}
         {view === "exports" ? <DownloadPackage workspace={workspace} job={exportJob} acknowledged={exportAcknowledged} disabled={!!processing} onAcknowledged={setExportAcknowledged} onStart={beginExport} onDownload={downloadLocalExportFile} onVerify={async (id) => setNotice((await verifyLocalExport(id)).verified ? "Package integrity and citation verification passed." : "Package verification found a problem; review the export status.")} /> : null}
         {view === "settings" ? <SettingsView workspace={workspace} localStatus={localStatus} onBackup={downloadEncryptedBackup} onReset={async () => { if (!confirm("Delete this workspace? This cannot be undone unless you have a backup.")) return; await clearWorkspace(storageMode); await initializeWorkspace(); }} /> : null}
       </section>
-      <input ref={fileInputRef} className="sr-only" type="file" multiple accept=".pdf,.docx,.txt,.eml,.msg,.jpg,.jpeg,.png,.tif,.tiff" onChange={(event) => { void importFiles(event.target.files); event.target.value = ""; }} />
-      <input ref={folderInputRef} className="sr-only" type="file" multiple {...({ webkitdirectory: "" } as React.InputHTMLAttributes<HTMLInputElement>)} onChange={(event) => { void importFiles(event.target.files); event.target.value = ""; }} />
+      <input ref={fileInputRef} className="sr-only" type="file" multiple accept={SOURCE_FILE_ACCEPT} onChange={(event) => { void importFiles(event.target.files); event.target.value = ""; }} />
+      <input ref={folderInputRef} className="sr-only" type="file" multiple accept={SOURCE_FILE_ACCEPT} {...({ webkitdirectory: "" } as React.InputHTMLAttributes<HTMLInputElement>)} onChange={(event) => { void importFiles(event.target.files); event.target.value = ""; }} />
     </main>
     {selectedCitation && selectedDocument ? <CitationDrawer citation={selectedCitation} document={selectedDocument} onClose={() => setSelectedCitationId(null)} /> : null}
   </div>;
@@ -344,11 +455,11 @@ function CaseData({ workspace, verifiedCount, exceptionCount, disabled, onUpload
 function Metric({ label, value, note, tone }: { label: string; value: number; note: string; tone?: "warn" | "good" }) { return <div className={`metric-card ${tone ?? ""}`}><span>{label}</span><strong>{value.toLocaleString()}</strong><small>{note}</small></div>; }
 function ActionRow({ done, title, detail, onClick }: { done: boolean; title: string; detail: string; onClick: () => void }) { return <button className="action-row" onClick={onClick}><span className={done ? "done" : ""}>{done ? <Check size={15} /> : null}</span><div><strong>{title}</strong><small>{detail}</small></div><ChevronRight size={17} /></button>; }
 
-function SourceDocuments({ workspace, disabled, onUpload, onDownload, onRetry }: { workspace: WorkspaceState; disabled: boolean; onUpload: () => void; onDownload?: (id: string, name: string) => Promise<void>; onRetry?: (id: string) => Promise<void> }) {
+function SourceDocuments({ workspace, disabled, retryDisabled, onUpload, onDownload, onRetry }: { workspace: WorkspaceState; disabled: boolean; retryDisabled: boolean; onUpload: () => void; onDownload?: (id: string, name: string) => Promise<void>; onRetry?: (id: string) => Promise<void> }) {
   const extractedDocumentIds = new Set((workspace.fieldOccurrences ?? []).map((item) => item.documentId));
   return <><PageHeading eyebrow="Immutable source inventory" title="Source Documents" description="Each version is hashed, parsed locally, and mapped to an immutable canonical text artifact." action={<button className="primary-button" disabled={disabled} onClick={onUpload}><FolderUp size={16} /> Add documents</button>} /><div className="panel table-panel"><table><thead><tr><th>Document</th><th>Type / language</th><th>Pages</th><th>Text / OCR</th><th>Extraction</th><th>Matter match</th><th>Added</th><th /></tr></thead><tbody>{workspace.documents.map((document) => {
     const extractionState = document.extractionState ?? (extractedDocumentIds.has(document.id) ? "complete" : "not-started");
-    return <tr key={document.id}><td><strong>{document.name}</strong><small>{formatBytes(document.size)} · {document.originalSha256.slice(0, 12)}…</small>{document.extractionError ? <small className="error-text">{document.extractionError}</small> : null}</td><td>{document.documentType ?? "Classification pending"}<small>{document.detectedLanguage === "es" ? "Spanish" : document.detectedLanguage === "en" ? "English" : "Language not set"}</small></td><td>{document.pageCount}</td><td><Status value={document.processingState} /></td><td><Status value={extractionState} /></td><td><Status value={document.matterMatchStatus ?? "review"} /></td><td>{formatDate(document.ingestedAt)}</td><td><div className="document-actions">{onRetry && extractionState !== "complete" && document.processingState === "ready" && document.canonicalText ? <button className="secondary-button compact-button" disabled={disabled} onClick={() => void onRetry(document.id)}>Retry extraction</button> : null}{onDownload ? <button className="icon-button" title="Download original" onClick={() => void onDownload(document.id, document.name)}><Download size={16} /></button> : null}</div></td></tr>;
+    return <tr key={document.id}><td><strong>{document.name}</strong><small>{formatBytes(document.size)} · {document.originalSha256.slice(0, 12)}…</small>{document.extractionError ? <small className="error-text">{document.extractionError}</small> : null}</td><td>{document.documentType ?? "Classification pending"}<small>{document.detectedLanguage === "es" ? "Spanish" : document.detectedLanguage === "en" ? "English" : "Language not set"}</small></td><td>{document.pageCount}</td><td><Status value={document.processingState} /></td><td><Status value={extractionState} /></td><td><Status value={document.matterMatchStatus ?? "review"} /></td><td>{formatDate(document.ingestedAt)}</td><td><div className="document-actions">{onRetry && extractionState !== "complete" && document.processingState === "ready" && document.canonicalText ? <button className="secondary-button compact-button" disabled={retryDisabled} onClick={() => void onRetry(document.id)}>Retry extraction</button> : null}{onDownload ? <button className="icon-button" title="Download original" onClick={() => void onDownload(document.id, document.name)}><Download size={16} /></button> : null}</div></td></tr>;
   })}</tbody></table>{workspace.documents.length === 0 ? <Empty title="No source documents" text="Add individual files or an entire matter folder." /> : null}</div></>;
 }
 

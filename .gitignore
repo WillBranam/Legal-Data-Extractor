@@ -16,3 +16,6 @@ paddleocr-venv/
 .env.local
 .env.*.local
 !.env.example
+
+# Spartan AI config (contains API keys)
+.spartan/ai.env
