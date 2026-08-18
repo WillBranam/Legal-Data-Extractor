@@ -66,6 +66,20 @@ function extractionErrorMessage(error: unknown): string {
   return message || EXTRACTION_ERROR_MESSAGES.LOCAL_API_ERROR;
 }
 
+const WORKSPACE_SAVE_ERROR_MESSAGES: Record<string, string> = {
+  WORKSPACE_CONFLICT: "This workspace was changed by another window since it was opened. Reload the page to pick up the current case index, then make the change again.",
+  LEGAL_HOLD_ACTIVE: "A legal hold is active on this matter. Release the hold before changing the case index.",
+  LEGAL_HOLD_PRESERVATION_REQUIRED: "A legal hold is active and this change would alter preserved documents. It was not saved.",
+  AUDIT_CHAIN_INVALID: "The local audit log failed verification. Saving is blocked until it is investigated.",
+  WORKSPACE_TOO_LARGE: "This case index is too large to save in one write. Split the matter across workspaces."
+};
+
+function workspaceSaveErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : "";
+  return WORKSPACE_SAVE_ERROR_MESSAGES[message]
+    ?? "The change could not be saved to the encrypted vault and was not applied. Try again; if it keeps failing, reload the page.";
+}
+
 function repairLoadedWorkspace(saved: WorkspaceState): { state: WorkspaceState; changed: boolean } {
   let changed = false;
   const entities = new Map((saved.entities ?? []).map((entity) => [entity.id, entity]));
@@ -148,7 +162,15 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
     return status;
   }, [localMode]);
 
+  // React re-invokes mount effects in development. Opening the workspace twice
+  // ran two loads and two repair writes against the same vault revision, which
+  // left the second one conflicting and the cached revision stale for the rest
+  // of the session.
+  const openedRef = useRef(false);
+
   useEffect(() => {
+    if (openedRef.current) return;
+    openedRef.current = true;
     let active = true;
     (async () => {
       try {
@@ -160,7 +182,10 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
           }
         }
         await initializeWorkspace();
-      } catch (error) { if (active) setAccessError(error instanceof Error ? error.message : "Could not open the workspace."); }
+      } catch (error) {
+        openedRef.current = false;
+        if (active) setAccessError(error instanceof Error ? error.message : "Could not open the workspace.");
+      }
     })();
     return () => { active = false; };
   }, [initializeWorkspace, localMode, refreshLocalStatus]);
@@ -182,6 +207,19 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
   async function updateWorkspace(next: WorkspaceState): Promise<void> {
     await saveWorkspace(next, storageMode);
     setWorkspace(next);
+  }
+
+  // Save failures must surface as an explained notice, never as an uncaught
+  // runtime error. Returns false when the change was not persisted, so callers
+  // never report success for work the vault rejected.
+  async function commitWorkspace(next: WorkspaceState): Promise<boolean> {
+    try {
+      await updateWorkspace(next);
+      return true;
+    } catch (error) {
+      setNotice(workspaceSaveErrorMessage(error));
+      return false;
+    }
   }
 
   // Accepts a live FileList (file picker), or a plain array (drop and paste).
@@ -365,27 +403,29 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
   async function resolveException(id: string, decision: "verify" | "withhold"): Promise<void> {
     if (!workspace) return;
     const next = resolveOccurrenceException(workspace, id, decision);
-    await updateWorkspace(next);
+    if (!await commitWorkspace(next)) return;
     setNotice(decision === "verify" ? "Value added to the verified case index." : "Value withheld from verified outputs.");
   }
 
   async function resolveDocument(id: string, decision: "attach" | "exclude"): Promise<void> {
     if (!workspace) return;
-    const next = resolveDocumentMatterMatch(workspace, id, decision); await updateWorkspace(next);
+    const next = resolveDocumentMatterMatch(workspace, id, decision);
+    if (!await commitWorkspace(next)) return;
     setNotice(decision === "attach" ? "Document released into this matter. Its previously verified values are available." : "Document excluded from this matter and all of its values withheld.");
   }
 
   async function toggleField(id: string): Promise<void> {
     if (!workspace) return;
     const definitions = (workspace.fieldDefinitions ?? []).map((item) => item.id === id ? { ...item, enabled: !item.enabled } : item);
-    await updateWorkspace({ ...workspace, fieldDefinitions: definitions, extractionSpecification: { version: 2, fieldDefinitionIds: definitions.filter((item) => item.enabled).map((item) => item.id), customInstructions: workspace.extractionSpecification?.customInstructions ?? "", detectedDocumentTypes: workspace.extractionSpecification?.detectedDocumentTypes ?? [], detectedLanguages: workspace.extractionSpecification?.detectedLanguages ?? [], confirmedAt: new Date().toISOString() } });
+    await commitWorkspace({ ...workspace, fieldDefinitions: definitions, extractionSpecification: { version: 2, fieldDefinitionIds: definitions.filter((item) => item.enabled).map((item) => item.id), customInstructions: workspace.extractionSpecification?.customInstructions ?? "", detectedDocumentTypes: workspace.extractionSpecification?.detectedDocumentTypes ?? [], detectedLanguages: workspace.extractionSpecification?.detectedLanguages ?? [], confirmedAt: new Date().toISOString() } });
   }
 
   async function addCustomField(): Promise<void> {
     if (!workspace || !newFieldLabel.trim()) return;
     const field = dynamicFieldDefinition({ documentType: "custom", label: newFieldLabel.trim(), valueType: "text" });
     const definitions = [...(workspace.fieldDefinitions ?? []).filter((item) => item.id !== field.id), field];
-    await updateWorkspace({ ...workspace, fieldDefinitions: definitions }); setNewFieldLabel(""); setNotice(`Added “${field.displayLabel}” to the extraction field set.`);
+    if (!await commitWorkspace({ ...workspace, fieldDefinitions: definitions })) return;
+    setNewFieldLabel(""); setNotice(`Added “${field.displayLabel}” to the extraction field set.`);
   }
 
   async function beginExport(): Promise<void> {

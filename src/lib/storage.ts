@@ -72,33 +72,76 @@ export async function loadWorkspace(
   return normalizeWorkspace(state);
 }
 
+async function putLocalWorkspace(state: WorkspaceState): Promise<{ ok: boolean; error?: string; revision?: string }> {
+  const response = await fetch("/api/local/workspace", {
+    method: "PUT",
+    credentials: "same-origin",
+    cache: "no-store",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      workspace: state,
+      revision: localWorkspaceRevision,
+      releaseLegalHold:
+        localWorkspaceLegalHold && state.matter.legalHold === false
+    })
+  });
+  const body = (await response.json().catch(() => ({}))) as {
+    revision?: string;
+    error?: string;
+  };
+  if (!response.ok) {
+    return { ok: false, error: body.error ?? `LOCAL_WORKSPACE_HTTP_${response.status}` };
+  }
+  return { ok: true, revision: body.revision };
+}
+
+/**
+ * Reads the vault's current revision without disturbing the caller's in-memory
+ * workspace. Used to repair the cached revision after a conflict.
+ */
+async function refreshLocalWorkspaceRevision(): Promise<void> {
+  const response = await fetch("/api/local/workspace", {
+    credentials: "same-origin",
+    cache: "no-store"
+  });
+  if (!response.ok) throw new Error(`LOCAL_WORKSPACE_HTTP_${response.status}`);
+  const body = (await response.json()) as { workspace: WorkspaceState | null; revision: string | null };
+  localWorkspaceRevision = body.revision;
+  if (body.workspace) localWorkspaceLegalHold = body.workspace.matter.legalHold;
+}
+
+async function saveLocalVaultWorkspace(state: WorkspaceState): Promise<void> {
+  let result = await putLocalWorkspace(state);
+  if (!result.ok && result.error === "WORKSPACE_CONFLICT") {
+    // The cached revision drifted from the vault — typically because an earlier
+    // write was applied by the server but its response was never recorded here.
+    // Nothing ever repaired it, so every later save failed permanently. This
+    // appliance is single-user with one vault, so re-reading the revision and
+    // retrying once is the correct recovery. A second conflict means a genuine
+    // concurrent writer and is surfaced rather than retried again.
+    await refreshLocalWorkspaceRevision();
+    result = await putLocalWorkspace(state);
+  }
+  if (!result.ok) throw new Error(result.error ?? "LOCAL_WORKSPACE_SAVE_FAILED");
+  localWorkspaceRevision = result.revision ?? null;
+  localWorkspaceLegalHold = state.matter.legalHold;
+}
+
+// Vault writes carry an optimistic revision, so two overlapping saves would
+// both send the same one and the loser would corrupt the cached revision.
+// Every save is chained so that can never happen.
+let localWorkspaceWriteQueue: Promise<unknown> = Promise.resolve();
+
 export async function saveWorkspace(
   state: WorkspaceState,
   mode: StorageMode = "browser-local"
 ): Promise<void> {
   if (mode === "encrypted-local-vault") {
-    const response = await fetch("/api/local/workspace", {
-      method: "PUT",
-      credentials: "same-origin",
-      cache: "no-store",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        workspace: state,
-        revision: localWorkspaceRevision,
-        releaseLegalHold:
-          localWorkspaceLegalHold && state.matter.legalHold === false
-      })
-    });
-    const body = (await response.json().catch(() => ({}))) as {
-      revision?: string;
-      error?: string;
-    };
-    if (!response.ok) {
-      throw new Error(body.error ?? `LOCAL_WORKSPACE_HTTP_${response.status}`);
-    }
-    localWorkspaceRevision = body.revision ?? null;
-    localWorkspaceLegalHold = state.matter.legalHold;
-    return;
+    const write = localWorkspaceWriteQueue
+      .catch(() => undefined)
+      .then(() => saveLocalVaultWorkspace(state));
+    localWorkspaceWriteQueue = write;
+    return write;
   }
   const db = await database();
   await db.put(STORE_NAME, state, STATE_KEY);
