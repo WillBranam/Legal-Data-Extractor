@@ -4,11 +4,26 @@
 node_modules
 public/ocr
 coverage
+*.tsbuildinfo
 *.log
 .verity-local-data
 .verity-local-data-*
+.verity-caseworks
 .verity-local-backups
+paddleocr-venv/
+
 .env
 .env.local
 .env.*.local
+# Timestamped copies such as .env.local.backup-20260818-170649 are not matched
+# by the patterns above and carry real credentials.
+.env.local.backup*
+.env.*.backup*
+*.env.bak
 !.env.example
+
+# Spartan AI config (contains API keys)
+.spartan/ai.env
+
+# Local AI tooling and prompt packs: developer-specific, not part of the product.
+.claude/

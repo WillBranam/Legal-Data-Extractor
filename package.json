@@ -6,29 +6,37 @@
     "postinstall": "node scripts/copy-ocr-assets.mjs",
     "dev": "NEXT_TELEMETRY_DISABLED=1 next dev",
     "local:model": "OLLAMA_HOST=127.0.0.1:11434 OLLAMA_NO_CLOUD=1 ollama serve",
-    "local": "LOCAL_ONLY_MODE=enabled PHI_MODE=disabled NEXT_TELEMETRY_DISABLED=1 next dev -H 127.0.0.1",
+    "local:setup": "node scripts/setup-local-runtime.mjs",
+    "local:migrate-vault": "node scripts/migrate-local-vault.mjs",
+    "local": "npm run --silent local:migrate-vault && LOCAL_ONLY_MODE=enabled PHI_MODE=enabled NEXT_TELEMETRY_DISABLED=1 next dev -H 127.0.0.1",
     "local:check": "node scripts/check-local-readiness.mjs",
     "build": "NEXT_TELEMETRY_DISABLED=1 next build",
     "local:build": "LOCAL_ONLY_MODE=enabled PHI_MODE=enabled NEXT_TELEMETRY_DISABLED=1 next build",
     "local:prepare-runtime": "npm prune --omit=dev",
     "local:verify-runtime": "npm audit --omit=dev",
     "start": "next start",
-    "local:start": "LOCAL_ONLY_MODE=enabled PHI_MODE=enabled NEXT_TELEMETRY_DISABLED=1 next start -H 127.0.0.1",
+    "local:start": "npm run --silent local:migrate-vault && LOCAL_ONLY_MODE=enabled PHI_MODE=enabled NEXT_TELEMETRY_DISABLED=1 next start -H 127.0.0.1",
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {
     "@tesseract.js-data/eng": "1.0.0",
+    "@tesseract.js-data/spa": "^1.0.0",
+    "@types/pdfkit": "^0.17.3",
+    "@types/sql.js": "^1.4.9",
     "docx": "^9.5.1",
+    "exceljs": "^4.4.0",
     "idb": "^8.0.3",
     "jszip": "^3.10.1",
     "lucide-react": "^0.468.0",
     "mammoth": "^1.8.0",
     "next": "^16.0.0",
     "pdfjs-dist": "5.5.207",
+    "pdfkit": "^0.17.2",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
+    "sql.js": "^1.13.0",
     "tesseract.js": "7.0.0",
     "zod": "^4.0.0"
   },
@@ -48,8 +56,9 @@
   "overrides": {
     "postcss": {
       ".": "^8.5.18",
-      "nanoid": "3.3.17"
+      "nanoid": "3.3.18"
     },
-    "sharp": "^0.35.0"
+    "sharp": "^0.35.0",
+    "uuid": "11.1.1"
   }
 }

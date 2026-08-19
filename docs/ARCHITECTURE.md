@@ -1,93 +1,119 @@
-# Architecture
+# Administrative Legal Document Automation Architecture
 
-## Supported deployment profiles
+## Product boundary
 
-The repository now has two deliberately separate operating profiles:
+Verity Caseworks is an administrative case-information digitization system. It
+classifies one matter’s documents and creates a typed lookup index of parties,
+roles, organizations, counsel, identifiers, contacts, dates, signatures,
+relationships, structured statuses, and other clearly labeled fields.
 
-- the public Vercel pilot, which remains limited to synthetic or de-identified
-  data and browser-local processing; and
-- the offline local appliance, which binds to loopback, stores originals and
-  workspace state in an encrypted local vault, and permits model calls only to
-  loopback Ollama.
+Narrative testimony, allegations, event reconstruction, and evidence synthesis
+are outside the default extraction specification. Existing v1 narrative records
+remain read-only in `legacyFacts` and are excluded from v2 exports.
 
-See [OFFLINE_ARCHITECTURE.md](./OFFLINE_ARCHITECTURE.md) for the local trust
-boundary, data lifecycle, and control ownership. See
-[HIPAA_READINESS_CHECKLIST.md](./HIPAA_READINESS_CHECKLIST.md) for the
-application controls and the organizational safeguards that remain the firm's
-responsibility.
-
-## Current pilot boundary
-
-The Vercel deployment serves the application shell and a non-sensitive health
-endpoint. Evidence processing occurs entirely in the browser:
+## Local processing flow
 
 ```text
-local file -> browser parser -> native text or local OCR
-           -> canonical UTF-8 artifact + page provenance
-           -> SHA-256 + exact byte spans
-           -> draft review -> approved fact index
-           -> local query plan -> verified claims
+source folder
+  -> immutable inventory and source hash
+  -> native text or tiered local OCR
+  -> canonical UTF-8 artifact and page provenance
+  -> document/language classification and editable field registry
+  -> structured field extraction with exact source spans
+  -> independent source-support and adversarial review
+  -> deterministic normalization, citation, hash, and matter checks
+  -> automatically verified information OR short exception queue
+  -> restricted administrative lookup
+  -> one synchronized SQLite/XLSX/DOCX/PDF/CSV/JSONL snapshot
 ```
 
-IndexedDB is the pilot source of truth. A restrictive Content Security Policy
-allows connections only to the deployment origin.
+The local application and Ollama bind only to loopback. Originals, canonical
+artifacts, typed records, citations, exceptions, audit events, and legal-hold
+state are stored in an AES-256-GCM local vault. Open exports are deliberately
+unencrypted for interoperability and require an explicit sensitive-data
+acknowledgement.
 
-## On-device OCR
+## Typed schema v2
 
-PDF.js first reads each PDF page's native text layer. Pages below the minimum
-usable-text threshold are rendered to an in-memory canvas and processed by a
-single reusable Tesseract.js worker. Image inputs take the same OCR path.
+The authoritative objects are `FieldDefinition`, `FieldOccurrence`,
+`CanonicalValue`, `Entity`, `Relationship`, and `SignatureObservation`.
+`FieldOccurrence` always retains both `rawValue` and `normalizedValue`.
+Identifiers are stored as text so leading zeros cannot be lost.
 
-The worker script, SIMD/fallback WebAssembly cores, and English trained data are
-copied from pinned dependencies at install time and served from `/ocr` on the
-application origin. No OCR runtime dependency is downloaded from a public CDN.
+The versioned field registry covers common administrative families and permits
+dynamic fields only when a value has an explicit label or structural anchor.
+Equivalent values reconcile automatically. Non-equivalent case numbers,
+identifiers, names, dates, or party values remain separate and create an
+exception; the model cannot silently choose a winner.
 
-Each OCR page records:
+An explicit conflicting case number quarantines the document. Quarantined
+documents cannot contribute to verified lookup views or exports until resolved.
 
-- extraction method
-- canonical UTF-8 page boundaries
-- rendered image pixel hash
-- rendered dimensions
-- OCR confidence
-- parser and OCR version
+## Tiered local OCR
 
-Canvases are released after each page. Files are processed sequentially to bound
-browser memory use, while the OCR worker is reused across a batch to avoid
-reloading the core and language model.
+1. PDF.js or the native office/text parser is used when usable text exists.
+2. A configured offline PP-OCRv5 worker performs local page OCR using only
+   pre-downloaded detection and recognition models.
+3. Bundled Tesseract.js English and Spanish weights provide a self-contained
+   browser fallback.
+4. Loopback-only `qwen3-vl:8b` is used selectively after low OCR confidence for
+   difficult handwriting, irregular layouts, checkboxes, and signature context.
+5. `qwen3:8b` performs structured field extraction and bounded review.
 
-## Citation invariant
+The PP-OCR worker is spawned for one request, receives a permission-restricted
+temporary page image, has model-source checks disabled, receives a minimal
+environment, and is securely removed after processing. It does not bind a port.
 
-For each citation, the application stores:
+## Verification rules
 
-- original file SHA-256
-- canonical artifact SHA-256
-- UTF-8 byte start and end
-- exact quotation
-- page or structural location
-- parser version
-
-A claim can be displayed as verified only when:
+For text fields:
 
 ```text
 SHA256(current canonical artifact) == stored canonical hash
-UTF8(canonical)[byteStart:byteEnd] == UTF8(exactQuote)
+UTF8(canonical)[byteStart:byteEnd] == UTF8(rawValue)
 ```
 
-The quotation shown to the user is read from the canonical artifact. It is not
-generated by a language model.
+The model proposes a field and source span; the application narrows the stored
+citation to the exact raw value and reconstructs the displayed quotation from
+canonical bytes. Sensitive identifiers publish automatically only when all
+characters survive exact citation validation and the extraction reaches the
+strict confidence threshold. Otherwise they are exceptions.
 
-## Production evolution
+Signature observations record presence, signer context, page, detector version,
+confidence, and available image provenance. All interfaces and outputs use the
+phrase “signature mark detected” and explicitly state that no authenticity or
+genuineness determination was made.
 
-The BAA-covered production architecture should preserve the same domain model
-while replacing browser persistence with:
+## Lookup boundary
 
-- Entra-federated authentication
-- private object storage for original and canonical evidence
-- PostgreSQL for matter, review, citation, and audit records
-- durable queues/workflows for parsing and OCR
-- an administrator-approved provider gateway
-- an egress allowlist
+Administrative lookup uses verified typed records only. It cannot use v1 legacy
+narratives, rejected or withheld values, quarantined documents, or arbitrary
+SQL. Results show the normalized value, exact source form, subject, field type,
+document, page, and verified citation.
 
-The Vercel frontend should use workload identity/OIDC to call that private
-backend. No provider API key or source document belongs in the browser or
-Vercel environment.
+## Synchronized output package
+
+One `ExportSnapshot` is the source for every format. It contains verified field
+occurrences, definitions, canonical values, entities, relationships, signatures,
+citations, documents, coverage, and disclosed exceptions. Cross-format counts
+must match before the package is hashed and released.
+
+`case.sqlite` contains typed tables, full-text search, and convenience views such
+as `case_master`, `client_directory`, `party_directory`, `counsel_directory`,
+`identifier_index`, `contact_index`, `important_dates`, `signature_register`,
+`relationship_index`, `document_register`, and `source_occurrences`.
+
+The Excel workbook is the primary staff-facing index. DOCX/PDF outputs are
+table-based Case Information Summary and Document Register references rather
+than model-authored narratives. CSV and JSONL mirror the typed tables.
+
+## Deployment profiles
+
+- The offline local appliance is the protected processing profile after firm
+  approval and readiness validation.
+- The public Vercel profile is limited to synthetic or de-identified data. It
+  has no hosted model, durable protected storage, BAA chain, or PHI approval.
+- A future hosted service must use a separately reviewed private backend,
+  enterprise identity, encrypted object/database storage, durable jobs, egress
+  controls, BAAs, and an administrator-approved model provider. That hosted
+  architecture is not implemented by this pivot.

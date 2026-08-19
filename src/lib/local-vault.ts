@@ -2,7 +2,6 @@ import {
   createHash,
   createHmac,
   randomBytes,
-  scrypt as nodeScrypt,
   timingSafeEqual,
   createCipheriv,
   createDecipheriv
@@ -22,17 +21,16 @@ import {
   writeFile
 } from "node:fs/promises";
 import path from "node:path";
-import { userInfo } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { promisify } from "node:util";
 import { PassThrough, pipeline, type Readable } from "node:stream";
 import type { WorkspaceState } from "@/lib/types";
+import { migrateWorkspaceToV2 } from "@/lib/workspace";
 
 const CONFIG_FILE = "vault-config.json";
 const WORKSPACE_FILE = "workspace.enc.json";
 const AUDIT_FILE = "audit.jsonl";
 const ORIGINALS_DIRECTORY = "originals";
-const SESSION_IDLE_MS = 30 * 60 * 1000;
-const SESSION_ABSOLUTE_MS = 12 * 60 * 60 * 1000;
 const VERIFIER_CONTEXT = "verity-caseworks-local-vault-verifier-v1";
 const AUDIT_CONTEXT = "verity-caseworks-local-audit-v1";
 const KEYCHAIN_SERVICE = "com.verity-caseworks.local-vault";
@@ -86,7 +84,7 @@ interface EncryptedPayloadV2 {
 
 type EncryptedPayload = EncryptedPayloadV1 | EncryptedPayloadV2;
 
-interface Session {
+export interface Session {
   username: string;
   key: Buffer;
   createdAt: number;
@@ -108,9 +106,8 @@ interface AuditRecordBody {
 export interface LocalVaultStatus {
   enabled: boolean;
   configured: boolean;
-  authenticated: boolean;
   username: string | null;
-  accessMode: "macos-keychain" | "legacy-password";
+  legacyVaultArchived: boolean;
   storage: "encrypted-local-vault";
   networkBoundary: "loopback-only";
   audit: {
@@ -120,13 +117,8 @@ export interface LocalVaultStatus {
 }
 
 declare global {
-  var __verityLocalSessions: Map<string, Session> | undefined;
-  var __verityKeychainKey: Buffer | undefined;
-}
-
-function sessions(): Map<string, Session> {
-  globalThis.__verityLocalSessions ??= new Map<string, Session>();
-  return globalThis.__verityLocalSessions;
+  var __verityKeychainKeys: Map<string, Buffer> | undefined;
+  var __verityLegacyVaultArchived: boolean | undefined;
 }
 
 export function localOnlyModeEnabled(): boolean {
@@ -135,16 +127,15 @@ export function localOnlyModeEnabled(): boolean {
 
 export function localDataDirectory(): string {
   const profile = process.env.LOCAL_DATA_PROFILE?.trim();
-  if (!profile) {
-    return path.join(/* turbopackIgnore: true */ process.cwd(), ".verity-local-data");
-  }
-  if (!/^[a-z0-9-]{1,40}$/i.test(profile)) {
+  if (profile && !/^[a-z0-9-]{1,40}$/i.test(profile)) {
     throw new Error("INVALID_LOCAL_DATA_PROFILE");
   }
-  return path.join(
-    /* turbopackIgnore: true */ process.cwd(),
-    `.verity-local-data-${profile}`
-  );
+  const configuredRoot = process.env.LOCAL_DATA_DIRECTORY?.trim();
+  if (configuredRoot && !path.isAbsolute(configuredRoot)) {
+    throw new Error("LOCAL_DATA_DIRECTORY_MUST_BE_ABSOLUTE");
+  }
+  const root = configuredRoot || path.join(homedir(), ".verity-caseworks");
+  return profile ? path.join(root, "profiles", profile) : path.join(root, "data");
 }
 
 async function ensureDataDirectory(): Promise<string> {
@@ -167,6 +158,31 @@ async function readConfig(): Promise<VaultConfig | null> {
   }
 }
 
+async function archiveLockedLegacyVault(): Promise<void> {
+  const directory = localDataDirectory();
+  const checkpoint = await readAuditCheckpoint();
+  const suffix = `${new Date().toISOString().replaceAll(/[:.]/g, "-")}-${randomBytes(4).toString("hex")}`;
+  const archive = path.join(
+    path.dirname(directory),
+    `${path.basename(directory)}.locked-vault-${suffix}`
+  );
+  await rename(directory, archive);
+  try {
+    if (checkpoint) {
+      await atomicPrivateWrite(
+        path.join(archive, "archived-audit-checkpoint.json"),
+        JSON.stringify(checkpoint, null, 2)
+      );
+    }
+    await deleteAuditCheckpoint();
+    await ensureDataDirectory();
+  } catch (error) {
+    await rename(archive, directory).catch(() => undefined);
+    throw error;
+  }
+  globalThis.__verityLegacyVaultArchived = true;
+}
+
 function localOsUsername(): string {
   const username = userInfo().username.trim();
   return username.length > 0 && username.length <= 80 ? username : "Local OS user";
@@ -175,6 +191,11 @@ function localOsUsername(): string {
 function auditCheckpointService(): string {
   const profile = process.env.LOCAL_DATA_PROFILE?.trim() || "default";
   return `${AUDIT_HEAD_KEYCHAIN_SERVICE}.${profile}`;
+}
+
+function vaultKeychainService(): string {
+  const profile = process.env.LOCAL_DATA_PROFILE?.trim() || "default";
+  return `${KEYCHAIN_SERVICE}.${profile}`;
 }
 
 interface AuditCheckpoint {
@@ -258,6 +279,31 @@ async function writeAuditCheckpoint(checkpoint: AuditCheckpoint): Promise<void> 
   );
 }
 
+async function deleteAuditCheckpoint(): Promise<void> {
+  try {
+    await execFile(
+      "/usr/bin/security",
+      [
+        "delete-generic-password",
+        "-a",
+        localOsUsername(),
+        "-s",
+        auditCheckpointService()
+      ],
+      { encoding: "utf8", maxBuffer: 4096 }
+    );
+  } catch (error) {
+    const commandError = error as { code?: string | number; stderr?: string };
+    if (
+      commandError.code === 44 ||
+      /could not be found in the keychain/i.test(commandError.stderr ?? "")
+    ) {
+      return;
+    }
+    throw error;
+  }
+}
+
 async function approveCurrentAuditRestorePoint(): Promise<void> {
   const checkpoint = await readAuditCheckpoint();
   if (!checkpoint) throw new Error("AUDIT_CHECKPOINT_MISSING");
@@ -273,53 +319,80 @@ async function approveCurrentAuditRestorePoint(): Promise<void> {
   await writeAuditCheckpoint({ ...checkpoint, restorePoints });
 }
 
-async function readKeychainKey(createWhenMissing: boolean): Promise<Buffer> {
-  if (process.platform !== "darwin") throw new Error("MACOS_KEYCHAIN_REQUIRED");
-  if (globalThis.__verityKeychainKey) {
-    return Buffer.from(globalThis.__verityKeychainKey);
-  }
+async function readKeychainSecret(service: string): Promise<string | null> {
   const username = localOsUsername();
-  let encoded: string;
   try {
     const result = await execFile(
       "/usr/bin/security",
-      ["find-generic-password", "-a", username, "-s", KEYCHAIN_SERVICE, "-w"],
+      ["find-generic-password", "-a", username, "-s", service, "-w"],
       { encoding: "utf8", maxBuffer: 4096 }
     );
-    encoded = result.stdout.trim();
+    return result.stdout.trim();
+  } catch (error) {
+    const commandError = error as { code?: string | number; stderr?: string };
+    if (
+      commandError.code === 44 ||
+      /could not be found in the keychain/i.test(commandError.stderr ?? "")
+    ) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function writeKeychainSecret(service: string, encoded: string): Promise<void> {
+  try {
+    await execFile(
+      "/usr/bin/security",
+      [
+        "add-generic-password",
+        "-U",
+        "-a",
+        localOsUsername(),
+        "-s",
+        service,
+        "-w",
+        encoded
+      ],
+      { encoding: "utf8", maxBuffer: 4096 }
+    );
   } catch {
+    throw new Error("LOCAL_KEYCHAIN_CREATE_FAILED");
+  }
+}
+
+async function readKeychainKey(createWhenMissing: boolean): Promise<Buffer> {
+  if (process.platform !== "darwin") throw new Error("MACOS_KEYCHAIN_REQUIRED");
+  const service = vaultKeychainService();
+  globalThis.__verityKeychainKeys ??= new Map<string, Buffer>();
+  const cached = globalThis.__verityKeychainKeys.get(service);
+  if (cached) return Buffer.from(cached);
+
+  let encoded = await readKeychainSecret(service);
+  if (!encoded && service !== KEYCHAIN_SERVICE) {
+    encoded = await readKeychainSecret(KEYCHAIN_SERVICE);
+    if (encoded) await writeKeychainSecret(service, encoded);
+  }
+  if (!encoded) {
     if (!createWhenMissing) throw new Error("LOCAL_KEYCHAIN_ENTRY_MISSING");
     encoded = randomBytes(32).toString("base64url");
-    try {
-      await execFile(
-        "/usr/bin/security",
-        [
-          "add-generic-password",
-          "-a",
-          username,
-          "-s",
-          KEYCHAIN_SERVICE,
-          "-w",
-          encoded
-        ],
-        { encoding: "utf8", maxBuffer: 4096 }
-      );
-    } catch {
-      throw new Error("LOCAL_KEYCHAIN_CREATE_FAILED");
-    }
+    await writeKeychainSecret(service, encoded);
   }
   const key = Buffer.from(encoded, "base64url");
   if (key.length !== 32) {
     key.fill(0);
     throw new Error("LOCAL_KEYCHAIN_KEY_INVALID");
   }
-  globalThis.__verityKeychainKey = Buffer.from(key);
+  globalThis.__verityKeychainKeys.set(service, Buffer.from(key));
   return key;
 }
 
-export async function osAccountLocalSession(): Promise<Session | null> {
+export async function osAccountLocalSession(): Promise<Session> {
   let config = await readConfig();
-  if (config?.version === 1) return null;
+  if (config?.version === 1) {
+    await archiveLockedLegacyVault();
+    config = null;
+  }
   const key = await readKeychainKey(config === null);
 
   if (!config) {
@@ -366,26 +439,6 @@ export async function osAccountLocalSession(): Promise<Session | null> {
     createdAt: Date.now(),
     lastSeenAt: Date.now()
   };
-}
-
-async function deriveKey(password: string, salt: Buffer): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    nodeScrypt(
-      password,
-      salt,
-      32,
-      {
-        N: 1 << 15,
-        r: 8,
-        p: 1,
-        maxmem: 64 * 1024 * 1024
-      },
-      (error, derivedKey) => {
-        if (error) reject(error);
-        else resolve(derivedKey);
-      }
-    );
-  });
 }
 
 function verifierFor(key: Buffer): Buffer {
@@ -442,125 +495,18 @@ async function atomicPrivateWrite(filePath: string, value: string): Promise<void
   await chmod(filePath, 0o600);
 }
 
-function newSession(username: string, key: Buffer): string {
-  const token = randomBytes(32).toString("base64url");
-  const now = Date.now();
-  sessions().set(createHash("sha256").update(token).digest("hex"), {
-    username,
-    key: Buffer.from(key),
-    createdAt: now,
-    lastSeenAt: now
-  });
-  return token;
-}
-
-function removeExpiredSessions(): void {
-  const now = Date.now();
-  for (const [id, session] of sessions()) {
-    if (
-      now - session.lastSeenAt > SESSION_IDLE_MS ||
-      now - session.createdAt > SESSION_ABSOLUTE_MS
-    ) {
-      session.key.fill(0);
-      sessions().delete(id);
-    }
-  }
-}
-
-export async function authenticateLocalSession(token: string | null): Promise<Session | null> {
-  if (!token) return null;
-  removeExpiredSessions();
-  const session = sessions().get(createHash("sha256").update(token).digest("hex")) ?? null;
-  if (session) session.lastSeenAt = Date.now();
-  return session;
-}
-
-export async function localVaultStatus(token: string | null): Promise<LocalVaultStatus> {
-  const initialConfig = await readConfig();
-  const session =
-    (await authenticateLocalSession(token)) ?? (await osAccountLocalSession());
-  const config = initialConfig ?? (await readConfig());
+export async function localVaultStatus(): Promise<LocalVaultStatus> {
+  const session = await osAccountLocalSession();
+  const config = await readConfig();
   return {
     enabled: localOnlyModeEnabled(),
     configured: config !== null,
-    authenticated: session !== null,
-    username: session?.username ?? null,
-    accessMode: config?.version === 1 ? "legacy-password" : "macos-keychain",
+    username: session.username,
+    legacyVaultArchived: globalThis.__verityLegacyVaultArchived ?? false,
     storage: "encrypted-local-vault",
     networkBoundary: "loopback-only",
-    audit: session ? await verifyAuditChain(session) : null
+    audit: await verifyAuditChain(session)
   };
-}
-
-export async function setupLocalVault(input: {
-  username: string;
-  password: string;
-}): Promise<string> {
-  if ((await readConfig()) !== null) throw new Error("Local vault is already configured.");
-  const username = input.username.trim();
-  if (username.length < 3 || username.length > 80) {
-    throw new Error("Reviewer name must be between 3 and 80 characters.");
-  }
-  if (input.password.length < 14) {
-    throw new Error("Local vault password must contain at least 14 characters.");
-  }
-  const salt = randomBytes(16);
-  const key = await deriveKey(input.password, salt);
-  const config: VaultConfig = {
-    version: 1,
-    username,
-    salt: salt.toString("base64"),
-    verifier: verifierFor(key).toString("base64"),
-    createdAt: new Date().toISOString()
-  };
-  const target = await configPath();
-  await writeFile(target, JSON.stringify(config, null, 2), {
-    encoding: "utf8",
-    mode: 0o600,
-    flag: "wx"
-  });
-  await chmod(target, 0o600);
-  await appendAuditEvent(key, username, "vault.setup", "success", "vault", null);
-  const token = newSession(username, key);
-  key.fill(0);
-  return token;
-}
-
-export async function loginLocalVault(input: {
-  username: string;
-  password: string;
-}): Promise<string | null> {
-  const config = await readConfig();
-  if (
-    !config ||
-    config.version !== 1 ||
-    config.username !== input.username.trim()
-  ) return null;
-  const key = await deriveKey(input.password, Buffer.from(config.salt, "base64"));
-  if (!safeEqualBase64(config.verifier, verifierFor(key))) {
-    key.fill(0);
-    return null;
-  }
-  const token = newSession(config.username, key);
-  await appendAuditEvent(key, config.username, "session.login", "success", "session", null);
-  key.fill(0);
-  return token;
-}
-
-export async function logoutLocalVault(token: string | null): Promise<void> {
-  const session = await authenticateLocalSession(token);
-  if (!session || !token) return;
-  await appendAuditEvent(
-    session.key,
-    session.username,
-    "session.logout",
-    "success",
-    "session",
-    null
-  );
-  const id = createHash("sha256").update(token).digest("hex");
-  session.key.fill(0);
-  sessions().delete(id);
 }
 
 async function encryptedFilePath(filename: string): Promise<string> {
@@ -572,7 +518,7 @@ export async function readLocalWorkspace(session: Session): Promise<WorkspaceSta
     const payload = JSON.parse(
       await readFile(await encryptedFilePath(WORKSPACE_FILE), "utf8")
     ) as EncryptedPayload;
-    const workspace = JSON.parse(decrypt(session.key, payload).toString("utf8")) as WorkspaceState;
+    const workspace = migrateWorkspaceToV2(JSON.parse(decrypt(session.key, payload).toString("utf8")) as WorkspaceState);
     await appendAuditEvent(
       session.key,
       session.username,
@@ -660,6 +606,14 @@ export async function writeLocalWorkspace(
         )
       ) {
         throw new Error("LEGAL_HOLD_PRESERVATION_REQUIRED");
+      }
+      const protectedCollections = ["fieldDefinitions", "fieldOccurrences", "canonicalValues", "entities", "relationships", "signatures", "legacyFacts"] as const;
+      for (const collection of protectedCollections) {
+        const existingItems = existing[collection] ?? [];
+        const nextItems = new Map((workspace[collection] ?? []).map((item) => [item.id, item]));
+        if (existingItems.some((item) => JSON.stringify(nextItems.get(item.id)) !== JSON.stringify(item))) {
+          throw new Error("LEGAL_HOLD_PRESERVATION_REQUIRED");
+        }
       }
     }
     const legalHoldChanged =
