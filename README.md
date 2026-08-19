@@ -25,6 +25,22 @@ workstation, firm, or workflow HIPAA compliant. Review the
 [HIPAA readiness checklist](docs/HIPAA_READINESS_CHECKLIST.md) before using real
 PHI.
 
+## Run it (quick reference)
+
+Daily start on a prepared machine. The model host and the application are two
+separate servers on two separate ports; never point one at the other's port.
+
+```bash
+omlx start            # model host on 127.0.0.1:8000 (or: npm run local:model for Ollama)
+npm run local:check   # every check must pass
+npm run local:start   # application on 127.0.0.1:3000
+```
+
+Open `http://127.0.0.1:3000`. For development use `npm run local` instead of
+`npm run local:start`. Full setup for a new machine is in
+[Run as an offline local appliance](#run-as-an-offline-local-appliance), and the
+current state of the project is in [project status](docs/PROJECT_STATUS.md).
+
 ## Supported files
 
 - Native and scanned PDF
@@ -372,3 +388,4 @@ npm run local:check
 - [Deployment isolation](docs/DEPLOYMENT.md)
 - [Security-hardening review](docs/hardening/hardening.md)
 - [Local acceptance report](docs/LOCAL_ACCEPTANCE_REPORT.md)
+- [Project status, measured performance, and known issues](docs/PROJECT_STATUS.md)
