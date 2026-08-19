@@ -15,6 +15,11 @@ paddleocr-venv/
 .env
 .env.local
 .env.*.local
+# Timestamped copies such as .env.local.backup-20260818-170649 are not matched
+# by the patterns above and carry real credentials.
+.env.local.backup*
+.env.*.backup*
+*.env.bak
 !.env.example
 
 # Spartan AI config (contains API keys)
