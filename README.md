@@ -50,7 +50,9 @@ current state of the project is in [project status](docs/PROJECT_STATUS.md).
 - JPEG, PNG, and TIFF images
 
 Native PDF text is used when available. The preferred offline OCR path is local
-PP-OCRv5. Bundled English/Spanish Tesseract assets provide an immediate fallback,
+PP-OCRv5. Scanned form pages are escalated to the local vision model when their
+printed labels were read but their handwritten answers were not, which mean
+confidence alone cannot detect. Bundled English/Spanish Tesseract assets provide an immediate fallback,
 and the loopback-only `qwen3-vl:8b` model is used selectively for difficult
 handwriting, irregular forms, checkboxes, and signature-region transcription.
 No OCR CDN or external OCR service is used.
