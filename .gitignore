@@ -24,3 +24,6 @@ paddleocr-venv/
 
 # Spartan AI config (contains API keys)
 .spartan/ai.env
+
+# Local AI tooling and prompt packs: developer-specific, not part of the product.
+.claude/

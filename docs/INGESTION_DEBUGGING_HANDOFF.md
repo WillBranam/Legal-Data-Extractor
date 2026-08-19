@@ -130,7 +130,7 @@ Before debugging:
 2. Prefer an isolated test profile and explicit port:
 
    ```bash
-   cd "/Users/williambranam/Desktop/Freelance/Legal-Data-Extractor"
+   cd "$(git rev-parse --show-toplevel)"
    npm run local:model
    LOCAL_DATA_PROFILE=qa-rivera-debug npm run local -- -p 3010
    ```
@@ -534,7 +534,7 @@ correct. The defects were all in the orchestration around it.
 
 ### Repository rules
 
-- Repository: `/Users/williambranam/Desktop/Freelance/Legal-Data-Extractor`
+- Repository: `Legal-Data-Extractor` (local clone)
 - The worktree may contain user and prior-agent changes. Inspect `git status`
   and preserve unrelated edits.
 - Do not commit, push, open a PR, merge, discard, or delete changes unless the
@@ -561,7 +561,7 @@ claim against the current code before editing:
 
 ```text
 Project: Verity Caseworks local-first administrative legal-document extractor.
-Repo: /Users/williambranam/Desktop/Freelance/Legal-Data-Extractor
+Repo: Legal-Data-Extractor (local clone)
 
 Verified upload bug and fix:
 - The browser FileList was copied only after an awaited readiness check while
