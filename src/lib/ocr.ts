@@ -59,34 +59,47 @@ export function createLocalOcrSession(): LocalOcrSession {
     return workerPromise;
   }
 
+  // The PP-OCRv5 path is a stateless request per page and is safe to run for
+  // several pages at once. The Tesseract worker is not: it is a single worker
+  // with shared progress state, so concurrent callers would interleave their
+  // logging and corrupt each other's progress. Serialize only that fallback.
+  let tesseractQueue: Promise<unknown> = Promise.resolve();
+
+  function serializeOnTesseract<T>(work: () => Promise<T>): Promise<T> {
+    const result = tesseractQueue.then(work, work);
+    tesseractQueue = result.catch(() => undefined);
+    return result;
+  }
+
   return {
     async recognize(image, onProgress) {
-      lastProgress = -1;
-      lastStatus = "";
-      progressListener = onProgress;
-      try {
-        if (image instanceof HTMLCanvasElement) {
-          const imageData = image.toDataURL("image/png");
-          try {
-            const response = await fetch("/api/local/ocr", { method: "POST", credentials: "same-origin", cache: "no-store", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ imageData, languages: ["en", "es"] }) });
-            if (response.ok) {
-              const local = await response.json() as OcrRecognition;
-              if (local.text.trim() && local.confidence >= 0.72) return local;
-            }
-          } catch { /* Local PaddleOCR is optional; use bundled browser OCR below. */ }
-        }
-        const activeWorker = await worker();
-        const result = await activeWorker.recognize(
+      if (image instanceof HTMLCanvasElement) {
+        const imageData = image.toDataURL("image/png");
+        try {
+          const response = await fetch("/api/local/ocr", { method: "POST", credentials: "same-origin", cache: "no-store", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ imageData, languages: ["en", "es"] }) });
+          if (response.ok) {
+            const local = await response.json() as OcrRecognition;
+            if (local.text.trim() && local.confidence >= 0.72) return local;
+          }
+        } catch { /* Local PaddleOCR is optional; use bundled browser OCR below. */ }
+      }
+      return serializeOnTesseract(async () => {
+        lastProgress = -1;
+        lastStatus = "";
+        progressListener = onProgress;
+        try {
+          const activeWorker = await worker();
+          const result = await activeWorker.recognize(
           image,
           { rotateAuto: true },
           { text: true }
-        );
-        const tesseractResult: OcrRecognition = {
+          );
+          const tesseractResult: OcrRecognition = {
           text: result.data.text,
           confidence: Math.max(0, Math.min(1, result.data.confidence / 100)),
           engine: "tesseract"
-        };
-        if (image instanceof HTMLCanvasElement && tesseractResult.confidence < 0.72) {
+          };
+          if (image instanceof HTMLCanvasElement && tesseractResult.confidence < 0.72) {
           try {
             const response = await fetch("/api/local/visual-ocr", { method: "POST", credentials: "same-origin", cache: "no-store", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ imageData: image.toDataURL("image/png") }) });
             if (response.ok) {
@@ -94,11 +107,12 @@ export function createLocalOcrSession(): LocalOcrSession {
               if (visual.text.trim()) return visual;
             }
           } catch { /* Preserve the deterministic Tesseract result if visual fallback is unavailable. */ }
+          }
+          return tesseractResult;
+        } finally {
+          progressListener = undefined;
         }
-        return tesseractResult;
-      } finally {
-        progressListener = undefined;
-      }
+      });
     },
     async terminate() {
       if (!workerPromise) return;

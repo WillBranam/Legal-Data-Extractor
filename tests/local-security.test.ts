@@ -70,6 +70,47 @@ describe("offline security boundaries", () => {
     );
   });
 
+  it("defaults to oMLX on loopback 8000 when no provider is configured", () => {
+    const saved = {
+      provider: process.env.LOCAL_LLM_PROVIDER,
+      baseUrl: process.env.LOCAL_LLM_BASE_URL,
+      model: process.env.LOCAL_LLM_MODEL,
+      vision: process.env.LOCAL_VISION_MODEL
+    };
+    delete process.env.LOCAL_LLM_PROVIDER;
+    delete process.env.LOCAL_LLM_BASE_URL;
+    delete process.env.LOCAL_LLM_MODEL;
+    delete process.env.LOCAL_VISION_MODEL;
+    try {
+      expect(localModelProvider()).toBe("openai");
+      expect(validatedLocalModelEndpoint().origin).toBe("http://127.0.0.1:8000");
+      expect(validatedLocalModelName()).toBe("Qwen3-8B-4bit");
+      expect(validatedLocalVisualModelName()).toBe("Qwen3-VL-8B-Instruct-4bit");
+    } finally {
+      for (const [key, value] of [
+        ["LOCAL_LLM_PROVIDER", saved.provider],
+        ["LOCAL_LLM_BASE_URL", saved.baseUrl],
+        ["LOCAL_LLM_MODEL", saved.model],
+        ["LOCAL_VISION_MODEL", saved.vision]
+      ] as const) {
+        if (value !== undefined) process.env[key] = value;
+      }
+    }
+  });
+
+  it("still resolves Ollama defaults when that provider is selected", () => {
+    const saved = process.env.LOCAL_LLM_PROVIDER;
+    process.env.LOCAL_LLM_PROVIDER = "ollama";
+    try {
+      expect(validatedLocalModelEndpoint().origin).toBe("http://127.0.0.1:11434");
+      expect(validatedLocalModelName()).toBe("qwen3:8b");
+      expect(validatedLocalVisualModelName()).toBe("qwen3-vl:8b");
+    } finally {
+      if (saved === undefined) delete process.env.LOCAL_LLM_PROVIDER;
+      else process.env.LOCAL_LLM_PROVIDER = saved;
+    }
+  });
+
   it("accepts MLX model identifiers but still rejects cloud routing", () => {
     expect(validatedLocalModelName("Qwen3-8B-4bit")).toBe("Qwen3-8B-4bit");
     expect(validatedLocalModelName("mlx-community/Qwen3-8B-4bit")).toBe("mlx-community/Qwen3-8B-4bit");

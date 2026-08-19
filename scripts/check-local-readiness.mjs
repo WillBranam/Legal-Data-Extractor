@@ -11,7 +11,8 @@ try {
 
 const minimumNode = [20, 18, 0];
 const currentNode = process.versions.node.split(".").map(Number);
-const provider = (process.env.LOCAL_LLM_PROVIDER?.trim().toLowerCase() || "ollama");
+// Defaults must track src/lib/local-model-provider.ts: oMLX on loopback 8000.
+const provider = (process.env.LOCAL_LLM_PROVIDER?.trim().toLowerCase() || "openai");
 const defaultEndpoint = provider === "openai" ? "http://127.0.0.1:8000" : "http://127.0.0.1:11434";
 const model = process.env.LOCAL_LLM_MODEL?.trim() || (provider === "openai" ? "Qwen3-8B-4bit" : "qwen3:8b");
 const visualModel = process.env.LOCAL_VISION_MODEL?.trim() || (provider === "openai" ? "Qwen3-VL-8B-Instruct-4bit" : "qwen3-vl:8b");

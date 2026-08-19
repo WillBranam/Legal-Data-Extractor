@@ -7,6 +7,7 @@ import {
   isConfiguredLocalModelInstalled,
   listInstalledModelNames,
   localModelProvider,
+  modelTimeoutForTokens,
   structuredChatCompletion,
   validatedLocalModelName,
   validatedLocalVisualModelName,
@@ -14,7 +15,6 @@ import {
 } from "@/lib/local-model-provider";
 import type { EvidenceDocument, FactRecord, FieldCategory, FieldDefinition, FieldValueType } from "@/lib/types";
 
-const MODEL_TIMEOUT_MS = 120_000;
 const MAX_DOCUMENT_BYTES = 16 * 1024 * 1024;
 const MAX_PAGES = 500;
 const MAX_FACTS = 200;
@@ -22,7 +22,20 @@ const MAX_QUERY_FACTS = 8;
 const MAX_FIELDS_PER_CHUNK = 8;
 const MIN_FIELDS_PER_CHUNK = 3;
 const MAX_CHUNK_CHARACTERS = 3_500;
-const MAX_EXTRACTION_DURATION_MS = 4 * 60 * 1000;
+// A per-document allowance must scale with the work, and the unit of work is a
+// span, not a page: a one-page DOCX can hold five spans while a scanned page
+// holds one. A flat four minutes was under half of what one 17-page fact sheet
+// needs at this model's throughput, so long documents were cut off unread.
+const EXTRACTION_BASE_MS = 60_000;
+const EXTRACTION_MS_PER_SPAN = 90_000;
+const EXTRACTION_CEILING_MS = 60 * 60 * 1000;
+
+export function extractionDurationBudget(spanCount: number): number {
+  return Math.min(
+    EXTRACTION_CEILING_MS,
+    EXTRACTION_BASE_MS + Math.max(1, spanCount) * EXTRACTION_MS_PER_SPAN
+  );
+}
 // Measured against qwen3:8b on both providers: a fully populated field object
 // costs roughly 190 output tokens when the model emits compact JSON. Budgeting
 // below this truncates the response mid-object and JSON.parse throws.
@@ -31,6 +44,8 @@ const MAX_EXTRACTION_DURATION_MS = 4 * 60 * 1000;
 // pretty-print, and oMLX does: the same eight fields cost 760 tokens compact
 // and blew past 1,856 indented. COMPACT_JSON_INSTRUCTION keeps output compact,
 // and this budget absorbs the rest.
+const MAX_RAW_VALUE_CHARACTERS = 200;
+const MAX_EXACT_QUOTE_CHARACTERS = 320;
 const EXTRACTION_TOKENS_PER_FIELD = 320;
 const EXTRACTION_TOKEN_OVERHEAD = 128;
 const COMPACT_JSON_INSTRUCTION =
@@ -112,6 +127,9 @@ export interface LocalExtractionResult {
     coverageReason: string | null;
     pagesScanned: number;
     totalPages: number;
+    /** Spans are the unit extraction actually works in; pages are coarser. */
+    spansScanned: number;
+    spansTotal: number;
     truncationRecoveries: number;
     reviewCompleted: boolean;
   };
@@ -328,16 +346,21 @@ async function structuredChat<T>(input: {
   deadline?: number;
   maxTokens?: number;
 }): Promise<T> {
+  const maxTokens = input.maxTokens ?? 512;
+  // The request needs long enough to generate its own budget. Where a document
+  // deadline applies it still wins, so one span can never eat the whole
+  // document allowance.
+  const allowance = modelTimeoutForTokens(maxTokens);
   const remaining = input.deadline
-    ? input.deadline - Date.now()
-    : MODEL_TIMEOUT_MS;
+    ? Math.min(allowance, input.deadline - Date.now())
+    : allowance;
   if (remaining <= 0) throw new Error("LOCAL_MODEL_DEADLINE_EXCEEDED");
   const completion = await structuredChatCompletion({
     system: `${input.system} ${COMPACT_JSON_INSTRUCTION}`,
     user: input.user,
     schema: input.format,
     schemaName: input.schemaName ?? "structured_output",
-    maxTokens: input.maxTokens ?? 512,
+    maxTokens,
     timeoutMs: remaining
   });
   // A budget-exhausted response is a valid prefix of the intended JSON, not
@@ -610,7 +633,7 @@ async function reviewProposalsWithLocalModel(
   deadline: number,
   documentType: string,
   language: "en" | "es" | "unknown",
-  coverage: { coverage: "complete" | "partial"; coverageReason: string | null; pagesScanned: number; totalPages: number; truncationRecoveries: number }
+  coverage: { coverage: "complete" | "partial"; coverageReason: string | null; pagesScanned: number; totalPages: number; spansScanned: number; spansTotal: number; truncationRecoveries: number }
 ): Promise<LocalExtractionResult> {
   if (proposals.length === 0) {
     return {
@@ -665,23 +688,33 @@ async function reviewProposalsWithLocalModel(
   const approvedIds = new Set<string>();
   const unreviewedIds = new Set<string>();
   let reviewCompleted = true;
-  const perBatchMs = Math.max(1, Math.floor((deadline - Date.now()) / Math.max(1, batches.length)));
 
-  for (const [batchIndex, batch] of batches.entries()) {
-    const batchDeadline = Math.min(deadline, Date.now() + perBatchMs);
-    const halfway = Date.now() + Math.max(1, Math.floor((batchDeadline - Date.now()) / 2));
-    const evidenceApproved = await reviewPass(EVIDENCE_REVIEWER_SYSTEM, batch, halfway);
-    const adversarialApproved = evidenceApproved === null
-      ? null
-      : await reviewPass(ADVERSARIAL_REVIEWER_SYSTEM, batch, batchDeadline);
+  // The two passes are independent judgements and the batches are independent
+  // of each other, so all of them share the same deadline and run together.
+  // Reviewing became the bottleneck once extraction spans went concurrent.
+  const passJobs = batches.flatMap((batch, batchIndex) => [
+    { batchIndex, system: EVIDENCE_REVIEWER_SYSTEM, batch },
+    { batchIndex, system: ADVERSARIAL_REVIEWER_SYSTEM, batch }
+  ]);
+  const passResults = await mapWithConcurrency(
+    passJobs,
+    extractionConcurrency(),
+    async (job) => reviewPass(job.system, job.batch, deadline)
+  );
+
+  const reviewed = batches.map((batch, batchIndex) => ({
+    batch,
+    evidenceApproved: passResults[batchIndex * 2],
+    adversarialApproved: passResults[batchIndex * 2 + 1]
+  }));
+
+  for (const { batch, evidenceApproved, adversarialApproved } of reviewed) {
     if (evidenceApproved === null || adversarialApproved === null) {
+      // A pass that could not run leaves its batch unreviewed rather than
+      // rejected, so the values reach a human instead of disappearing.
       reviewCompleted = false;
       for (const candidate of batch) unreviewedIds.add(candidate.id);
-      // Later batches will not fare better once the model is failing.
-      if (batchIndex < batches.length - 1) {
-        for (const remaining of batches.slice(batchIndex + 1).flat()) unreviewedIds.add(remaining.id);
-      }
-      break;
+      continue;
     }
     for (const id of consensusApprovedProposalIds(
       batch.map((candidate) => candidate.id),
@@ -760,8 +793,13 @@ function extractionFormat(fieldLimit: number): object {
           properties: {
             canonical_key: { type: "string" }, display_label: { type: "string" },
             category: { type: "string", enum: fieldCategories }, value_type: { type: "string", enum: fieldValueTypes },
-            source_label: { type: "string" }, raw_value: { type: "string" },
-            exact_quote: { type: "string" },
+            source_label: { type: "string" }, raw_value: { type: "string", maxLength: MAX_RAW_VALUE_CHARACTERS },
+            // OCR'd text tokenizes at roughly one character per token, so an
+            // unbounded verbatim quote is the single largest cost in the
+            // response. One 17-page scan spent its entire 2,688-token budget
+            // on 3,194 characters. Citations stay exact because a bounded
+            // quote is still a contiguous substring of the source.
+            exact_quote: { type: "string", maxLength: MAX_EXACT_QUOTE_CHARACTERS },
             subject_name: { type: ["string", "null"] }, subject_type: { type: ["string", "null"], enum: ["person", "organization", "firm", "court", "unknown", null] },
             relationship_type: { type: ["string", "null"] }, related_entity_name: { type: ["string", "null"] },
             confidence: { type: "number", minimum: 0, maximum: 1 }
@@ -838,6 +876,69 @@ async function extractChunkFields(input: {
   return attempt(reducedLimit);
 }
 
+/**
+ * A request that outlived its allowance is not an unreachable model. Reporting
+ * a timeout as "unavailable" sent an investigation to the model host when the
+ * fault was the client hanging up, so the two are now distinct.
+ */
+const DEFAULT_EXTRACTION_CONCURRENCY = 4;
+const MAX_EXTRACTION_CONCURRENCY = 16;
+
+/**
+ * Spans are independent — nothing in a span's extraction depends on another —
+ * so they are the natural place to use the model server's batching. Running
+ * them one at a time left the GPU idle between requests and made a 17-page
+ * scan a sequential wait.
+ */
+export function extractionConcurrency(): number {
+  const configured = Number.parseInt(process.env.LOCAL_EXTRACTION_CONCURRENCY ?? "", 10);
+  if (!Number.isFinite(configured) || configured < 1) return DEFAULT_EXTRACTION_CONCURRENCY;
+  return Math.min(MAX_EXTRACTION_CONCURRENCY, configured);
+}
+
+/**
+ * Bounded-concurrency map that preserves input order in its results. Order
+ * matters here: published values must follow the document, not whichever span
+ * the model happened to finish first.
+ */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  worker: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  const runners = Array.from(
+    { length: Math.max(1, Math.min(limit, items.length)) },
+    async () => {
+      for (;;) {
+        const index = cursor;
+        cursor += 1;
+        if (index >= items.length) return;
+        results[index] = await worker(items[index]);
+      }
+    }
+  );
+  await Promise.all(runners);
+  return results;
+}
+
+type SpanOutcome =
+  | { status: "extracted"; extraction: ChunkExtraction }
+  | { status: "incomplete"; reason: string };
+
+function describeSpanFailure(error: unknown): string {
+  if (error instanceof MalformedModelOutputError) {
+    return "The local model returned an unreadable response for part of this document.";
+  }
+  const name = error instanceof Error ? error.name : "";
+  const message = error instanceof Error ? error.message : "";
+  if (name === "TimeoutError" || name === "AbortError" || message === "LOCAL_MODEL_DEADLINE_EXCEEDED") {
+    return "The local model ran out of time on part of this document.";
+  }
+  return "The local model became unavailable partway through this document.";
+}
+
 export async function extractWithLocalModel(
   document: EvidenceDocument,
   fieldDefinitions: FieldDefinition[] = []
@@ -849,55 +950,94 @@ export async function extractWithLocalModel(
   const proposals: LocalExtractionProposal[] = [];
   const seen = new Set<string>();
   const startedAt = Date.now();
-  const deadline = startedAt + MAX_EXTRACTION_DURATION_MS;
-  // Hold time back for review so discovery cannot consume the whole allowance
-  // and leave verified proposals unreviewed.
-  const discoveryDeadline = startedAt + Math.floor(MAX_EXTRACTION_DURATION_MS * (1 - REVIEW_DEADLINE_RESERVE));
   let documentType = "Unclassified legal document";
   let language: "en" | "es" | "unknown" = "unknown";
   let truncationRecoveries = 0;
   let pagesScanned = 0;
+  // Pages are a coarse unit: one aborted span on page 1 of 17 reported "0 of 17
+  // pages" and read as total failure even when spans had succeeded. Spans are
+  // the unit work actually happens in, so progress is reported in both.
+  let spansScanned = 0;
+  let spansTotal = 0;
   let coverageReason: string | null = null;
   const enabledFields = fieldDefinitions.filter((field) => field.enabled).map((field) => ({ canonical_key: field.canonicalKey, label: field.displayLabel, category: field.category, value_type: field.valueType, source_labels: field.sourceLabels }));
 
-  for (const page of document.pages) {
-    if (proposals.length >= MAX_FACTS) { coverageReason = "The per-document value limit was reached before every page was scanned."; break; }
-    if (Date.now() >= discoveryDeadline) { coverageReason = "The extraction time limit was reached before every page was scanned."; break; }
-    const pageText = readCanonicalByteRange(
-      document.canonicalText,
-      page.canonicalByteStart,
-      page.canonicalByteEnd
-    );
+  const pageTexts = document.pages.map((page) => readCanonicalByteRange(
+    document.canonicalText,
+    page.canonicalByteStart,
+    page.canonicalByteEnd
+  ));
+  spansTotal = pageTexts.reduce((total, text) => total + chunks(text).length, 0);
+
+  const durationBudget = extractionDurationBudget(spansTotal);
+  const deadline = startedAt + durationBudget;
+  // Hold time back for review so discovery cannot consume the whole allowance
+  // and leave verified proposals unreviewed.
+  const discoveryDeadline = startedAt + Math.floor(durationBudget * (1 - REVIEW_DEADLINE_RESERVE));
+
+  const spans = document.pages.flatMap((page, pageIndex) =>
+    chunks(pageTexts[pageIndex]).map((chunk) => ({ page, pageIndex, chunk }))
+  );
+
+  // Guard the per-document value ceiling before spending model time on a span
+  // whose results would be discarded. With spans in flight this is necessarily
+  // approximate, so the merge below still enforces the hard limit.
+  let harvestedFields = 0;
+
+  const outcomes = await mapWithConcurrency<typeof spans[number], SpanOutcome>(
+    spans,
+    extractionConcurrency(),
+    async (span) => {
+      if (Date.now() >= discoveryDeadline) {
+        return { status: "incomplete", reason: "The extraction time limit was reached before every page was scanned." };
+      }
+      if (harvestedFields >= MAX_FACTS) {
+        return { status: "incomplete", reason: "The per-document value limit was reached before every page was scanned." };
+      }
+      try {
+        const extraction = await extractChunkFields({
+          pageNumber: span.page.pageNumber,
+          text: span.chunk.text,
+          availableFields: enabledFields,
+          deadline: discoveryDeadline,
+          fieldLimit: MAX_FIELDS_PER_CHUNK
+        });
+        harvestedFields += extraction.fields.length;
+        return { status: "extracted", extraction };
+      } catch (error) {
+        // A model failure on one span no longer discards the whole document.
+        // Deterministic label matches and every other span are retained, and
+        // the shortfall is disclosed through coverage.
+        return { status: "incomplete", reason: describeSpanFailure(error) };
+      }
+    }
+  );
+
+  // Merge in document order so published values are reproducible regardless of
+  // the order the model returned them in.
+  let spanCursor = 0;
+  for (const [pageIndex, page] of document.pages.entries()) {
+    const pageText = pageTexts[pageIndex];
     for (const proposal of deterministicLabeledProposals(document, page.pageNumber, pageText, fieldDefinitions)) {
       const identity = localExtractionProposalIdentity(proposal);
       if (!seen.has(identity)) { seen.add(identity); proposals.push(proposal); }
     }
     let pageComplete = true;
     for (const chunk of chunks(pageText)) {
-      if (proposals.length >= MAX_FACTS || Date.now() >= discoveryDeadline) {
+      const outcome = outcomes[spanCursor];
+      spanCursor += 1;
+      if (!outcome || outcome.status === "incomplete") {
         pageComplete = false;
-        coverageReason = coverageReason ?? "The extraction time limit was reached partway through a page.";
-        break;
+        coverageReason = coverageReason ?? outcome?.reason ?? "This document was not scanned end to end.";
+        continue;
       }
-      let extraction: ChunkExtraction;
-      try {
-        extraction = await extractChunkFields({
-          pageNumber: page.pageNumber,
-          text: chunk.text,
-          availableFields: enabledFields,
-          deadline: discoveryDeadline,
-          fieldLimit: MAX_FIELDS_PER_CHUNK
-        });
-      } catch (error) {
-        // A model failure on one span no longer discards the whole document.
-        // Deterministic label matches and every earlier span are retained, and
-        // the shortfall is disclosed through coverage.
+      if (proposals.length >= MAX_FACTS) {
         pageComplete = false;
-        coverageReason = error instanceof MalformedModelOutputError
-          ? "The local model returned an unreadable response for part of this document."
-          : "The local model became unavailable partway through this document.";
-        break;
+        coverageReason = coverageReason ?? "The per-document value limit was reached before every page was scanned.";
+        continue;
       }
+      const extraction = outcome.extraction;
+      spansScanned += 1;
       if (extraction.recovered) truncationRecoveries += 1;
       documentType = extraction.documentType || documentType;
       if (extraction.language !== "unknown") language = extraction.language;
@@ -920,8 +1060,7 @@ export async function extractWithLocalModel(
         }
       }
     }
-    if (!pageComplete) break;
-    pagesScanned += 1;
+    if (pageComplete) pagesScanned += 1;
   }
 
   return reviewProposalsWithLocalModel(document, proposals, deadline, documentType, language, {
@@ -929,6 +1068,8 @@ export async function extractWithLocalModel(
     coverageReason: pagesScanned === document.pages.length ? null : coverageReason,
     pagesScanned,
     totalPages: document.pages.length,
+    spansScanned,
+    spansTotal,
     truncationRecoveries
   });
 }

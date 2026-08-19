@@ -36,7 +36,7 @@ The appliance supports two loopback model hosts, selected by
 `LOCAL_LLM_PROVIDER`. All transport lives in `src/lib/local-model-provider.ts`;
 extraction, review, and citation logic are identical on both.
 
-| | `ollama` (default) | `openai` (oMLX) |
+| | `ollama` | `openai` (oMLX, default) |
 | --- | --- | --- |
 | Base URL | `http://127.0.0.1:11434` | `http://127.0.0.1:8000` |
 | List models | `/api/tags` → `models[].name` | `/v1/models` → `data[].id` |

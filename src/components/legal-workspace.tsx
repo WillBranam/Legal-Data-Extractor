@@ -66,6 +66,23 @@ function extractionErrorMessage(error: unknown): string {
   return message || EXTRACTION_ERROR_MESSAGES.LOCAL_API_ERROR;
 }
 
+/**
+ * Pages alone understate progress: an aborted span on page 1 of 17 reported
+ * "0 of 17 pages" even when spans had succeeded and their values were kept.
+ */
+function describeExtractionProgress(summary: {
+  pagesScanned: number;
+  totalPages: number;
+  spansScanned: number;
+  spansTotal: number;
+}): string {
+  const pages = `${summary.pagesScanned} of ${summary.totalPages} pages were read`;
+  if (summary.pagesScanned === 0 && summary.spansScanned > 0) {
+    return `${pages}, but ${summary.spansScanned} of ${summary.spansTotal} text spans were scanned and their values were kept.`;
+  }
+  return `${pages}.`;
+}
+
 const WORKSPACE_SAVE_ERROR_MESSAGES: Record<string, string> = {
   WORKSPACE_CONFLICT: "This workspace was changed by another window since it was opened. Reload the page to pick up the current case index, then make the change again.",
   LEGAL_HOLD_ACTIVE: "A legal hold is active on this matter. Release the hold before changing the case index.",
@@ -284,7 +301,7 @@ export function LegalWorkspace({ localMode = false }: { localMode?: boolean }) {
             next = applyAdministrativeExtraction(next, queuedDocument, result);
             if (result.reviewSummary.coverage === "partial") {
               partial.push(`${file.name} (${result.reviewSummary.pagesScanned} of ${result.reviewSummary.totalPages} pages)`);
-              next = { ...next, documents: next.documents.map((item) => item.id === document.id ? { ...item, extractionState: "failed" as const, extractionError: `${result.reviewSummary.coverageReason ?? "This document was not scanned end to end."} ${result.reviewSummary.pagesScanned} of ${result.reviewSummary.totalPages} pages were read. Retry extraction to finish it.` } : item) };
+              next = { ...next, documents: next.documents.map((item) => item.id === document.id ? { ...item, extractionState: "failed" as const, extractionError: `${result.reviewSummary.coverageReason ?? "This document was not scanned end to end."} ${describeExtractionProgress(result.reviewSummary)} Retry extraction to finish it.` } : item) };
             }
             verified += (next.fieldOccurrences ?? []).filter((item) => item.documentId === document.id && item.status === "verified").length;
             exceptions += (next.fieldOccurrences ?? []).filter((item) => item.documentId === document.id && item.status === "exception").length;

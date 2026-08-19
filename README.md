@@ -17,7 +17,7 @@ The application has two intentionally separate operating profiles:
 
 | Profile | Intended use | Model | Storage |
 | --- | --- | --- | --- |
-| Offline local appliance | Protected case data after firm approval | Local Ollama model | Encrypted local vault |
+| Offline local appliance | Protected case data after firm approval | Local oMLX model (Ollama supported) | Encrypted local vault |
 | Online Vercel pilot | Synthetic or de-identified data only | No hosted LLM | Browser IndexedDB |
 
 The application supplies technical safeguards, but does not by itself make a
@@ -50,9 +50,9 @@ You also need:
 - Git, unless you download the repository as a ZIP;
 - Node.js 20.18 or newer;
 - npm, included with Node.js;
-- Ollama;
+- a local model host: oMLX (the default, on loopback port 8000) or Ollama;
 - enough local disk space for the repository, encrypted case vault, OCR assets,
-  and the `qwen3:8b` and `qwen3-vl:8b` models.
+  and the text and vision model weights.
 
 The initial dependency installation and model download require internet access.
 After preparation, the local appliance can run with external networking
@@ -66,11 +66,17 @@ disconnected.
 git clone https://github.com/WillBranam/Legal-Data-Extractor.git
 cd Legal-Data-Extractor
 npm ci
-ollama pull qwen3:8b
-ollama pull qwen3-vl:8b
 npm run local:build
 npm run local:prepare-runtime
 npm run local:verify-runtime
+```
+
+Then install the model weights for your host. For the default oMLX profile see
+[Default model host: oMLX](#default-model-host-omlx) below. For Ollama:
+
+```bash
+ollama pull qwen3:8b
+ollama pull qwen3-vl:8b
 ```
 
 If you already have the repository folder, start with `cd` into that folder and
@@ -88,9 +94,11 @@ recognition model directories while online, then set absolute paths in
 npm run local:setup
 ```
 
-This command performs those steps on an Apple Silicon Mac, installs
-`qwen3-vl:8b`, preserves existing `.env.local` values, runs an OCR smoke test,
-and finishes with the complete readiness check. The resulting settings are:
+This command performs those steps on an Apple Silicon Mac, preserves existing
+`.env.local` values, runs an OCR smoke test, and finishes with the complete
+readiness check. Its model step targets the Ollama host and installs
+`qwen3-vl:8b`; on the default oMLX profile install the MLX vision build instead
+and let the readiness check confirm it. The resulting settings are:
 
 ```text
 PADDLEOCR_PYTHON=/absolute/path/to/paddleocr-venv/bin/python
@@ -108,29 +116,40 @@ after the production build is complete. `local:verify-runtime` audits only the
 installed production dependency boundary. Run `npm ci` again before doing
 development work or rebuilding.
 
-`qwen3:8b` is the structured field-extraction default. Machines with limited
-memory may set `LOCAL_LLM_MODEL=qwen3:4b`, but should expect lower recall and
+`Qwen3-8B-4bit` on oMLX is the structured field-extraction default, and
+`qwen3:8b` is its Ollama equivalent. Extraction spans are sent to the model
+concurrently; `LOCAL_EXTRACTION_CONCURRENCY` (default 4) tunes how many run at
+once, and scanned pages are OCRed up to four at a time. The PP-OCRv5 workers stay
+resident between pages so the models are loaded once per scan rather than once
+per page, and they exit after 90 seconds idle to give the memory back. Machines with limited memory may drop to
+the 4B build of either, but should expect lower recall and
 must validate it against representative intake forms, cover sheets, service
 documents, notices, agreements, and identifiers.
 
-### Alternative model host: oMLX
+### Default model host: oMLX
 
-The appliance can run against Ollama (default) or any OpenAI-compatible
-loopback server. oMLX is supported and measured about 30% faster on Apple
-Silicon. MLX cannot load Ollama's GGUF weights, so install MLX builds:
+The appliance defaults to oMLX on loopback port `8000`, which measured about
+30% faster than Ollama on Apple Silicon. MLX cannot load Ollama's GGUF weights,
+so install MLX builds:
 
 - text: `mlx-community/Qwen3-8B-4bit`
 - vision: `mlx-community/Qwen3-VL-8B-Instruct-4bit`
 
-Place them under `~/.omlx/models/`, run `omlx restart` so the server rescans,
-then set in `.env.local`:
+Place them under `~/.omlx/models/` and run `omlx restart` so the server
+rescans. The provider, base URL, and both model names above are the built-in
+defaults, so `.env.local` only needs the API key when oMLX auth is enabled:
 
 ```text
-LOCAL_LLM_PROVIDER=openai
-LOCAL_LLM_BASE_URL=http://127.0.0.1:8000
-LOCAL_LLM_MODEL=Qwen3-8B-4bit
-LOCAL_VISION_MODEL=Qwen3-VL-8B-Instruct-4bit
 LOCAL_LLM_API_KEY=<oMLX API key>
+```
+
+To override any of them, or to run the alternative Ollama host instead:
+
+```text
+LOCAL_LLM_PROVIDER=ollama
+LOCAL_LLM_BASE_URL=http://127.0.0.1:11434
+LOCAL_LLM_MODEL=qwen3:8b
+LOCAL_VISION_MODEL=qwen3-vl:8b
 ```
 
 Model names are the **directory basename**, not the Hugging Face path. Verify
@@ -140,7 +159,10 @@ first. See the [provider notes](docs/INGESTION_DEBUGGING_HANDOFF.md).
 
 ### 2. Start the local model
 
-With the Ollama profile, in the first terminal:
+With the default oMLX profile, start the oMLX server and confirm it is bound to
+loopback port `8000`. Nothing needs to run in this repository for that host.
+
+With the alternative Ollama profile, in the first terminal:
 
 ```bash
 cd Legal-Data-Extractor
@@ -171,8 +193,9 @@ Every readiness check must pass. Open:
 http://127.0.0.1:3000
 ```
 
-Do not bind the application or Ollama to `0.0.0.0`, a LAN address, a reverse
-proxy, or a public tunnel.
+The application itself listens on port `3000`; the model host listens on
+`8000` (oMLX) or `11434` (Ollama). Do not bind the application or the model
+host to `0.0.0.0`, a LAN address, a reverse proxy, or a public tunnel.
 
 ### 4. First use
 

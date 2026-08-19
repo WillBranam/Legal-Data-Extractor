@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Offline PP-OCRv5 one-shot worker. Model directories must already exist locally."""
+"""Offline PP-OCRv5 worker. Model directories must already exist locally.
+
+Two modes:
+  one-shot   ppocr-worker.py IMAGE --model-dir DIR
+  serve      ppocr-worker.py --serve --model-dir DIR
+
+Building the engine costs about 4.6 seconds, which dominated a one-shot run
+whose recognition step takes about 5.5 seconds. Serve mode builds it once and
+then answers one JSON request per stdin line, so a long scan pays that cost
+once instead of once per page."""
 import argparse
 import json
 import os
@@ -17,7 +26,8 @@ def model_name(model_directory: str) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("image")
+    parser.add_argument("image", nargs="?")
+    parser.add_argument("--serve", action="store_true")
     parser.add_argument("--model-dir", required=True)
     args = parser.parse_args()
     os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
@@ -39,8 +49,31 @@ def main() -> int:
         use_textline_orientation=False,
         device="cpu",
     )
+    if args.serve:
+        # Signal readiness only after the models are resident, so the caller
+        # never sends work to a worker that is still starting up.
+        print(json.dumps({"ready": True}), flush=True)
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                request = json.loads(line)
+                print(json.dumps(recognize(engine, request["image"]), ensure_ascii=False), flush=True)
+            except Exception as exc:  # noqa: BLE001 - report, never kill the worker
+                print(json.dumps({"error": f"{type(exc).__name__}: {exc}"}), flush=True)
+        return 0
+
+    if not args.image:
+        print(json.dumps({"error": "image path required unless --serve is set"}))
+        return 2
+    print(json.dumps(recognize(engine, args.image), ensure_ascii=False))
+    return 0
+
+
+def recognize(engine, image_path: str) -> dict:
     texts, scores = [], []
-    for result in engine.predict(args.image):
+    for result in engine.predict(image_path):
         data = result.json if hasattr(result, "json") else result
         if callable(data):
             data = data()
@@ -50,8 +83,7 @@ def main() -> int:
         texts.extend(str(value) for value in payload.get("rec_texts", []) if str(value).strip())
         scores.extend(float(value) for value in payload.get("rec_scores", []))
     confidence = sum(scores) / len(scores) if scores else 0.0
-    print(json.dumps({"text": "\n".join(texts), "confidence": confidence, "engine": "pp-ocrv5"}, ensure_ascii=False))
-    return 0
+    return {"text": "\n".join(texts), "confidence": confidence, "engine": "pp-ocrv5"}
 
 
 if __name__ == "__main__":

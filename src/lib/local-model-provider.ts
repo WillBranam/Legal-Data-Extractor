@@ -18,13 +18,45 @@ const DEFAULT_BASE_URLS: Record<LocalModelProvider, string> = {
   openai: "http://127.0.0.1:8000"
 };
 
-const DEFAULT_MODEL = "qwen3:8b";
-const DEFAULT_VISUAL_MODEL = "qwen3-vl:8b";
-const MODEL_TIMEOUT_MS = 120_000;
+// oMLX is the default host: it is measurably faster on Apple Silicon, so the
+// appliance should not silently fall back to Ollama when .env.local is absent.
+const DEFAULT_PROVIDER: LocalModelProvider = "openai";
+
+const DEFAULT_MODELS: Record<LocalModelProvider, string> = {
+  ollama: "qwen3:8b",
+  openai: "Qwen3-8B-4bit"
+};
+
+const DEFAULT_VISUAL_MODELS: Record<LocalModelProvider, string> = {
+  ollama: "qwen3-vl:8b",
+  openai: "Qwen3-VL-8B-Instruct-4bit"
+};
+// A flat request timeout cannot hold. The extraction budget is 2,688 output
+// tokens and a 4-bit 8B model on Apple Silicon sustains roughly 20-25 tokens
+// per second, so a span that spends its whole budget needs over two minutes of
+// generation alone. The old flat 120s cap aborted exactly those spans and
+// reported a healthy model as unavailable. Derive the allowance from the token
+// budget instead, so the two can never drift apart again.
+const MIN_EXPECTED_TOKENS_PER_SECOND = 12;
+const MODEL_REQUEST_OVERHEAD_MS = 30_000;
+const MODEL_TIMEOUT_CEILING_MS = 600_000;
 const LOOPBACK_HOSTS = ["127.0.0.1", "localhost", "[::1]"];
 
+/**
+ * Wall-clock allowance for one model request generating up to `maxTokens`.
+ * The floor rate is deliberately pessimistic: a machine under memory pressure,
+ * or one that has just swapped models, generates well below its warm rate.
+ */
+export function modelTimeoutForTokens(maxTokens: number): number {
+  const generationMs = (Math.max(1, maxTokens) / MIN_EXPECTED_TOKENS_PER_SECOND) * 1000;
+  return Math.min(
+    MODEL_TIMEOUT_CEILING_MS,
+    Math.round(MODEL_REQUEST_OVERHEAD_MS + generationMs)
+  );
+}
+
 export function localModelProvider(
-  value = process.env.LOCAL_LLM_PROVIDER?.trim().toLowerCase() || "ollama"
+  value = process.env.LOCAL_LLM_PROVIDER?.trim().toLowerCase() || DEFAULT_PROVIDER
 ): LocalModelProvider {
   if (value !== "ollama" && value !== "openai") {
     throw new Error("LOCAL_MODEL_PROVIDER_INVALID");
@@ -48,7 +80,7 @@ export function validatedLocalModelEndpoint(
 }
 
 export function validatedLocalModelName(
-  value = process.env.LOCAL_LLM_MODEL?.trim() || DEFAULT_MODEL
+  value = process.env.LOCAL_LLM_MODEL?.trim() || DEFAULT_MODELS[localModelProvider()]
 ): string {
   // Ollama uses name:tag; MLX servers use a directory basename, which may
   // include a vendor prefix such as mlx-community/Qwen3-8B-4bit.
@@ -63,7 +95,7 @@ export function validatedLocalModelName(
 }
 
 export function validatedLocalVisualModelName(
-  value = process.env.LOCAL_VISION_MODEL?.trim() || DEFAULT_VISUAL_MODEL
+  value = process.env.LOCAL_VISION_MODEL?.trim() || DEFAULT_VISUAL_MODELS[localModelProvider()]
 ): string {
   if (
     !/^[a-zA-Z0-9][a-zA-Z0-9._/:+-]{0,127}$/.test(value) ||
@@ -82,7 +114,7 @@ function apiKey(): string {
 export async function localModelFetch(
   pathname: string,
   init?: RequestInit,
-  timeoutMs = MODEL_TIMEOUT_MS
+  timeoutMs = MODEL_TIMEOUT_CEILING_MS
 ): Promise<Response> {
   const url = validatedLocalModelEndpoint();
   url.pathname = pathname;
@@ -91,7 +123,7 @@ export async function localModelFetch(
     ...init,
     redirect: "error",
     cache: "no-store",
-    signal: AbortSignal.timeout(Math.max(1, Math.min(MODEL_TIMEOUT_MS, timeoutMs))),
+    signal: AbortSignal.timeout(Math.max(1, Math.min(MODEL_TIMEOUT_CEILING_MS, timeoutMs))),
     headers: {
       "Content-Type": "application/json",
       ...(key ? { Authorization: `Bearer ${key}` } : {}),
@@ -249,7 +281,7 @@ export async function visualTranscription(
         images: [imageBase64],
         options: { temperature: 0, num_predict: maxTokens }
       })
-    });
+    }, modelTimeoutForTokens(maxTokens));
     if (!response.ok) throw new Error(`LOCAL_VISUAL_MODEL_HTTP_${response.status}`);
     const body = (await response.json()) as { response?: string };
     if (!body.response?.trim()) throw new Error("LOCAL_VISUAL_MODEL_EMPTY_RESPONSE");
@@ -273,7 +305,7 @@ export async function visualTranscription(
         }
       ]
     })
-  });
+  }, modelTimeoutForTokens(maxTokens));
   if (response.status === 401 || response.status === 403) {
     throw new Error("LOCAL_MODEL_AUTH_REJECTED");
   }
