@@ -116,7 +116,7 @@ export const workspaceStateSchema = z.object({
     documentId: z.string().min(1).max(100), rawValue: z.string().max(10_000), normalizedValue: z.string().max(10_000), valueType: fieldValueTypeSchema,
     language: z.enum(["en", "es", "unknown"]), citationIds: z.array(z.string().max(100)).max(100), pageNumber: z.number().int().positive().nullable(),
     boundingBox: z.string().max(1024).nullable(), extractionConfidence: z.number().min(0).max(1), normalizationConfidence: z.number().min(0).max(1),
-    status: informationStatusSchema, exceptionReason: z.string().max(5000).nullable(), sourceLabel: z.string().max(500)
+    status: informationStatusSchema, exceptionReason: z.string().max(5000).nullable(), sourceLabel: z.string().max(500), decidedByUser: z.boolean().optional()
   })).max(500_000).optional(),
   canonicalValues: z.array(z.object({
     id: z.string().min(1).max(100), fieldDefinitionId: z.string().min(1).max(100), subjectEntityId: z.string().max(100).nullable(),

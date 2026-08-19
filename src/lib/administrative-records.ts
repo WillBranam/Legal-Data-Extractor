@@ -257,12 +257,41 @@ export function applyAdministrativeExtraction(
   };
 }
 
+/**
+ * Records a human decision on one exception and settles the group it belonged
+ * to. Choosing a value answers the question the conflict was asking, so the
+ * values it competed with are withheld rather than left in the queue demanding
+ * another decision for the same field.
+ */
 export function resolveOccurrenceException(workspace: WorkspaceState, occurrenceId: string, decision: "verify" | "withhold"): WorkspaceState {
-  const occurrences = (workspace.fieldOccurrences ?? []).map((item) => item.id === occurrenceId ? {
-    ...item,
-    status: decision === "verify" ? "verified" as const : "withheld" as const,
-    exceptionReason: decision === "verify" ? null : "Withheld by user during exception review."
-  } : item);
+  const all = workspace.fieldOccurrences ?? [];
+  const target = all.find((item) => item.id === occurrenceId);
+  const groupKey = (item: FieldOccurrence): string =>
+    `${item.fieldDefinitionId}:${item.subjectEntityId ?? "matter"}:${item.sourceLabel.toLocaleLowerCase("en-US").replaceAll(/[^a-z0-9]+/g, " ").trim()}`;
+  const occurrences = all.map((item) => {
+    if (item.id === occurrenceId) {
+      return {
+        ...item,
+        status: decision === "verify" ? "verified" as const : "withheld" as const,
+        exceptionReason: decision === "verify" ? null : "Withheld by user during exception review.",
+        decidedByUser: true
+      };
+    }
+    const competing = decision === "verify"
+      && target
+      && item.status === "exception"
+      && !item.decidedByUser
+      && groupKey(item) === groupKey(target);
+    if (competing) {
+      return {
+        ...item,
+        status: "withheld" as const,
+        exceptionReason: "Superseded by the value chosen during exception review.",
+        decidedByUser: true
+      };
+    }
+    return item;
+  });
   const reconciled = reconcileOccurrences(occurrences);
   return { ...workspace, fieldOccurrences: reconciled.occurrences, canonicalValues: reconciled.canonicalValues };
 }

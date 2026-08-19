@@ -120,10 +120,27 @@ export function normalizeInformationValue(rawValue: string, valueType: FieldValu
   return { value: raw, confidence: raw.length > 0 ? 0.95 : 0, ambiguous: false };
 }
 
+/**
+ * Two values compete only if they mean different things. Punctuation, case and
+ * spacing differences are formatting, not disagreement: "(626) 555-0198" and
+ * "626-555-0198" are one phone number, and flagging them as a conflict sends a
+ * decision to a human that has no content.
+ */
+function equivalenceKey(value: string): string {
+  return value.toLocaleLowerCase("en-US").normalize("NFKD").replaceAll(/[^a-z0-9]+/g, "");
+}
+
+function groupingLabel(value: string): string {
+  return value.toLocaleLowerCase("en-US").normalize("NFKD").replaceAll(/[^a-z0-9]+/g, " ").trim();
+}
+
 export function reconcileOccurrences(occurrences: FieldOccurrence[]): { canonicalValues: CanonicalValue[]; occurrences: FieldOccurrence[] } {
   const grouped = new Map<string, FieldOccurrence[]>();
   for (const occurrence of occurrences) {
-    const key = `${occurrence.fieldDefinitionId}:${occurrence.subjectEntityId ?? "matter"}`;
+    // The source label is part of the identity of a value. Generic catch-all
+    // fields (checkbox, amount, address) otherwise collect unrelated answers
+    // from all over a form into one bucket and declare them contradictory.
+    const key = `${occurrence.fieldDefinitionId}:${occurrence.subjectEntityId ?? "matter"}:${groupingLabel(occurrence.sourceLabel)}`;
     grouped.set(key, [...(grouped.get(key) ?? []), occurrence]);
   }
   const canonicalValues: CanonicalValue[] = [];
@@ -131,12 +148,26 @@ export function reconcileOccurrences(occurrences: FieldOccurrence[]): { canonica
   const nextMap = new Map(next.map((item) => [item.id, item]));
   for (const [key, values] of grouped) {
     const normalized = new Map<string, FieldOccurrence[]>();
-    for (const value of values) normalized.set(value.normalizedValue, [...(normalized.get(value.normalizedValue) ?? []), value]);
-    const conflictGroupId = normalized.size > 1 ? stableId("CONFLICT", key) : null;
-    for (const [normalizedValue, matching] of normalized) {
-      const status = conflictGroupId ? "conflict" : matching.every((item) => item.status === "verified") ? "verified" : "withheld";
-      canonicalValues.push({ id: stableId("VAL", `${key}:${normalizedValue}`), fieldDefinitionId: matching[0].fieldDefinitionId, subjectEntityId: matching[0].subjectEntityId, normalizedValue, occurrenceIds: matching.map((item) => item.id), resolutionStatus: status, conflictGroupId });
-      if (conflictGroupId) for (const item of matching) Object.assign(nextMap.get(item.id)!, { status: "exception" as InformationStatus, exceptionReason: "Conflicting non-equivalent values were found for the same field and subject." });
+    for (const value of values) {
+      const identity = equivalenceKey(value.normalizedValue);
+      normalized.set(identity, [...(normalized.get(identity) ?? []), value]);
+    }
+    // A value a person already ruled on is settled and cannot be in dispute.
+    const undecided = new Set(
+      values.filter((item) => !item.decidedByUser).map((item) => equivalenceKey(item.normalizedValue))
+    );
+    const conflictGroupId = undecided.size > 1 ? stableId("CONFLICT", key) : null;
+    for (const [identity, matching] of normalized) {
+      const status = conflictGroupId
+        ? "conflict"
+        : matching.every((item) => item.status === "verified") ? "verified" : "withheld";
+      canonicalValues.push({ id: stableId("VAL", `${key}:${identity}`), fieldDefinitionId: matching[0].fieldDefinitionId, subjectEntityId: matching[0].subjectEntityId, normalizedValue: matching[0].normalizedValue, occurrenceIds: matching.map((item) => item.id), resolutionStatus: status, conflictGroupId });
+      if (conflictGroupId) {
+        for (const item of matching) {
+          if (item.decidedByUser) continue;
+          Object.assign(nextMap.get(item.id)!, { status: "exception" as InformationStatus, exceptionReason: "Conflicting non-equivalent values were found for the same field and subject." });
+        }
+      }
     }
   }
   return { canonicalValues, occurrences: next };

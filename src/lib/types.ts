@@ -144,6 +144,12 @@ export interface FieldOccurrence {
   status: InformationStatus;
   exceptionReason: string | null;
   sourceLabel: string;
+  /**
+   * A person decided this value in the exception queue. Reconciliation must
+   * never overwrite it, or the decision silently reverts and the button looks
+   * broken.
+   */
+  decidedByUser?: boolean;
 }
 
 export interface CanonicalValue {
